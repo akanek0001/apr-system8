@@ -12,9 +12,6 @@ class DashboardPage:
     def __init__(self, repo: Repository):
         self.repo = repo
 
-    # =========================
-    # helper
-    # =========================
     def _safe_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
@@ -27,9 +24,6 @@ class DashboardPage:
     def _today_str(self) -> str:
         return U.fmt_date(U.now_jst())
 
-    # =========================
-    # render
-    # =========================
     def render(self) -> None:
         st.title("ダッシュボード")
         st.caption(f"管理者: {AdminAuth.current_namespace()}")
@@ -47,9 +41,6 @@ class DashboardPage:
         total_apr = 0.0
         today_apr = 0.0
 
-        # =========================
-        # Members 集計
-        # =========================
         if not members_df.empty:
             mdf = members_df.copy()
             mdf["IsActive"] = mdf["IsActive"].apply(U.truthy)
@@ -58,9 +49,6 @@ class DashboardPage:
             active_members = int(mdf[mdf["IsActive"] == True].shape[0])
             total_principal = float(mdf[mdf["IsActive"] == True]["Principal"].sum())
 
-        # =========================
-        # Ledger 集計
-        # =========================
         if not ledger_df.empty:
             ldf = ledger_df.copy()
             ldf["Type"] = ldf["Type"].astype(str).str.strip()
@@ -75,9 +63,6 @@ class DashboardPage:
                     apr_df[apr_df["Datetime_JST"].astype(str).str.startswith(today)]["Amount"].sum()
                 )
 
-        # =========================
-        # Header metrics
-        # =========================
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("有効プロジェクト数", len(projects))
         c2.metric("有効メンバー数", active_members)
@@ -97,9 +82,6 @@ class DashboardPage:
             else:
                 st.info("有効プロジェクトがありません。")
 
-        # =========================
-        # SmartVault 最新値
-        # =========================
         st.divider()
         st.subheader("SmartVault 最新状況")
 
@@ -120,9 +102,6 @@ class DashboardPage:
             with st.expander("SmartVault 履歴（先頭30件）", expanded=False):
                 st.dataframe(self._safe_df(sdf.head(30)), use_container_width=True, hide_index=True)
 
-        # =========================
-        # APR Summary
-        # =========================
         st.divider()
         st.subheader("APR Summary")
 
@@ -135,9 +114,6 @@ class DashboardPage:
 
             st.dataframe(self._safe_df(sdf.head(30)), use_container_width=True, hide_index=True)
 
-        # =========================
-        # Members 一覧
-        # =========================
         st.divider()
         st.subheader("メンバー一覧")
 
@@ -156,9 +132,6 @@ class DashboardPage:
                 hide_index=True,
             )
 
-        # =========================
-        # 最新 Ledger
-        # =========================
         st.divider()
         st.subheader("最新 Ledger")
 
@@ -175,9 +148,6 @@ class DashboardPage:
                 hide_index=True,
             )
 
-        # =========================
-        # APR履歴
-        # =========================
         st.divider()
         st.subheader("APR履歴")
 
