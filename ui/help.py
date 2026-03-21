@@ -4,12 +4,13 @@ import io
 import re
 from typing import Dict
 
-import requests
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
 
 from config import AppConfig
 from repository.repository import Repository
+from services.external_service import ExternalService
 from core.auth import AdminAuth
 
 
@@ -18,29 +19,7 @@ class HelpPage:
         self.repo = repo
 
     # =========================
-    # OCR API
-    # =========================
-    def _ocr_request(self, img_bytes: bytes) -> str:
-        api_key = st.secrets["ocrspace"]["api_key"]
-
-        res = requests.post(
-            "https://api.ocr.space/parse/image",
-            files={"file": ("img.png", img_bytes)},
-            data={
-                "apikey": api_key,
-                "language": "eng",
-                "isOverlayRequired": False,
-            },
-            timeout=30,
-        )
-
-        data = res.json()
-        if "ParsedResults" not in data or not data["ParsedResults"]:
-            return ""
-        return str(data["ParsedResults"][0].get("ParsedText", "")).strip()
-
-    # =========================
-    # 画像切り抜き
+    # OCR helper
     # =========================
     def _crop(self, img: Image.Image, box: Dict[str, float]) -> Image.Image:
         w, h = img.size
@@ -53,21 +32,11 @@ class HelpPage:
             )
         )
 
-    # =========================
-    # 数値抽出
-    # =========================
-    def _num(self, text: str) -> float:
-        m = re.findall(r"[-+]?\d*\.\d+|\d+", str(text).replace(",", ""))
-        return float(m[0]) if m else 0.0
-
-    # =========================
-    # 枠描画
-    # =========================
     def _draw(self, img: Image.Image, boxes: Dict[str, Dict[str, float]]) -> Image.Image:
         d = ImageDraw.Draw(img)
         w, h = img.size
 
-        for b in boxes.values():
+        for _, b in boxes.items():
             d.rectangle(
                 [
                     (b["left"] * w, b["top"] * h),
@@ -78,8 +47,20 @@ class HelpPage:
             )
         return img
 
+    def _num(self, text: str) -> float:
+        m = re.findall(r"[-+]?\d*\.\d+|\d+", str(text).replace(",", ""))
+        return float(m[0]) if m else 0.0
+
+    def _safe_float(self, value, default: float) -> float:
+        try:
+            if str(value).strip() == "":
+                return float(default)
+            return float(value)
+        except Exception:
+            return float(default)
+
     # =========================
-    # メイン
+    # render
     # =========================
     def render(self) -> None:
         st.title("ヘルプ / OCR設定")
@@ -90,14 +71,38 @@ class HelpPage:
 
         st.markdown(
             """
-## 使用シート一覧
+## 全体アーキテクチャ（固定）
 
-### シート命名ルール
-すべてのシートは次の形式で統一します。
+UI  
+↓  
+Controller  
+↓  
+Repository  
+↓  
+Service  
+↓  
+External（Sheets / LINE / OCR）
 
-`<BaseName>__<Namespace>`
+---
 
-例:
+## データフロー（実際に動く流れ）
+
+Help で設定確認 / OCRテスト  
+↓  
+APRページでAPR入力  
+↓  
+FinanceEngineで計算  
+↓  
+RepositoryでLedger保存  
+↓  
+Dashboardで表示  
+↓  
+必要に応じてLINE送信
+
+---
+
+## シート構造（完全固定）
+
 - Settings__A
 - Members__A
 - Ledger__A
@@ -108,25 +113,50 @@ class HelpPage:
 - OCR_Transaction_History__A
 - APR_Auto_Queue__A
 
-`_A` ではなく、必ず `__A` を使います。  
-無印シートは使いません。
+※ `_A` ではなく、必ず `__A` を使います  
+※ 無印シートは使いません
 
 ---
 
-### A環境の使用シート
-- Settings__A
-- Members__A
-- Ledger__A
-- LineUsers__A
-- APR_Summary__A
-- SmartVault_History__A
-- OCR_Transaction__A
-- OCR_Transaction_History__A
-- APR_Auto_Queue__A
+## コア責務（重要）
+
+### UI
+- 表示と入力のみ
+- 計算しない
+- データ保存ロジックを持たない
+
+### Controller
+- 全体の接続
+- ページ切替
+- UI / Repository / Engine / Service の橋渡し
+
+### Repository
+- データの読み書き
+- DataFrame整形
+- シートI/O管理
+- 計算しない
+
+### Engine
+- APR計算だけ担当
+- 外部接続しない
+
+### Service
+- OCR / LINE / Sheets など外部接続だけ
+- 計算しない
 
 ---
 
-## シート役割
+## 正しい実装ルール（これ守る）
+
+1. UIは計算しない  
+2. Repositoryはロジックを持たない  
+3. Engineだけが計算する  
+4. Serviceは外部接続だけ  
+5. Controllerが全部をつなぐ  
+
+---
+
+## 使用シート役割
 
 ### Settings__A
 APR設定、OCR座標、Compound_Timing、Active管理
@@ -202,58 +232,48 @@ OCR座標は Settings__A で管理します。
             st.warning("有効なプロジェクトがありません。")
             return
 
+        st.divider()
+        st.subheader("OCRテスト")
+
         project = st.selectbox("OCR設定対象プロジェクト", projects, key="help_project")
         row = settings_df[settings_df["Project_Name"].astype(str).str.strip() == str(project).strip()].iloc[0]
 
-        def g(key: str, default: float) -> float:
-            try:
-                value = row.get(key, default)
-                if str(value).strip() == "":
-                    return float(default)
-                return float(value)
-            except Exception:
-                return float(default)
-
-        st.subheader("OCRテスト")
-
         boxes = {
             "LIQ": {
-                "left": g("SV_Total_Liquidity_Left_Mobile", 0.05),
-                "top": g("SV_Total_Liquidity_Top_Mobile", 0.25),
-                "right": g("SV_Total_Liquidity_Right_Mobile", 0.40),
-                "bottom": g("SV_Total_Liquidity_Bottom_Mobile", 0.34),
+                "left": self._safe_float(row.get("SV_Total_Liquidity_Left_Mobile", 0.05), 0.05),
+                "top": self._safe_float(row.get("SV_Total_Liquidity_Top_Mobile", 0.25), 0.25),
+                "right": self._safe_float(row.get("SV_Total_Liquidity_Right_Mobile", 0.40), 0.40),
+                "bottom": self._safe_float(row.get("SV_Total_Liquidity_Bottom_Mobile", 0.34), 0.34),
             },
             "PROFIT": {
-                "left": g("SV_Yesterday_Profit_Left_Mobile", 0.40),
-                "top": g("SV_Yesterday_Profit_Top_Mobile", 0.25),
-                "right": g("SV_Yesterday_Profit_Right_Mobile", 0.70),
-                "bottom": g("SV_Yesterday_Profit_Bottom_Mobile", 0.34),
+                "left": self._safe_float(row.get("SV_Yesterday_Profit_Left_Mobile", 0.40), 0.40),
+                "top": self._safe_float(row.get("SV_Yesterday_Profit_Top_Mobile", 0.25), 0.25),
+                "right": self._safe_float(row.get("SV_Yesterday_Profit_Right_Mobile", 0.70), 0.70),
+                "bottom": self._safe_float(row.get("SV_Yesterday_Profit_Bottom_Mobile", 0.34), 0.34),
             },
             "APR": {
-                "left": g("SV_APR_Left_Mobile", 0.70),
-                "top": g("SV_APR_Top_Mobile", 0.25),
-                "right": g("SV_APR_Right_Mobile", 0.95),
-                "bottom": g("SV_APR_Bottom_Mobile", 0.34),
+                "left": self._safe_float(row.get("SV_APR_Left_Mobile", 0.70), 0.70),
+                "top": self._safe_float(row.get("SV_APR_Top_Mobile", 0.25), 0.25),
+                "right": self._safe_float(row.get("SV_APR_Right_Mobile", 0.95), 0.95),
+                "bottom": self._safe_float(row.get("SV_APR_Bottom_Mobile", 0.34), 0.34),
             },
         }
 
-        f = st.file_uploader("画像", type=["png", "jpg", "jpeg"], key="help_ocr_file")
-
-        if not f:
+        uploaded = st.file_uploader("画像", type=["png", "jpg", "jpeg"], key="help_ocr_file")
+        if not uploaded:
             return
 
-        img = Image.open(f).convert("RGB")
-        st.image(self._draw(img.copy(), boxes), caption="OCR範囲")
+        img = Image.open(uploaded).convert("RGB")
+        st.image(self._draw(img.copy(), boxes), caption="OCR範囲", use_container_width=True)
 
         results = {}
-
-        for k, b in boxes.items():
+        for key, b in boxes.items():
             crop = self._crop(img, b)
             buf = io.BytesIO()
             crop.save(buf, format="PNG")
 
-            txt = self._ocr_request(buf.getvalue())
-            results[k] = {
+            txt = ExternalService.ocr_space_extract_text(buf.getvalue())
+            results[key] = {
                 "text": txt,
                 "value": self._num(txt),
             }
@@ -264,3 +284,16 @@ OCR座標は Settings__A で管理します。
         c3.metric("APR", f"{results['APR']['value']}")
 
         st.text_area("RAW", str(results), height=220)
+
+        # 参考: OCR取引履歴
+        st.divider()
+        st.subheader("OCR Transaction History（先頭30件）")
+        ocr_hist = self.repo.load_ocr_transaction_history()
+        if ocr_hist.empty:
+            st.info("OCR_Transaction_History は空です。")
+        else:
+            show = ocr_hist.loc[:, ~ocr_hist.columns.duplicated()].copy()
+            st.dataframe(show.head(30), use_container_width=True, hide_index=True)
+
+
+# END OF FILE
