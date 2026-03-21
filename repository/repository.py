@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
@@ -14,344 +14,512 @@ class Repository:
     def __init__(self, gs: GSheetService):
         self.gs = gs
 
-    def _ensure_setting_defaults(self, df: pd.DataFrame) -> pd.DataFrame:
+    # =========================
+    # 共通
+    # =========================
+    def _empty_df(self, key: str) -> pd.DataFrame:
+        headers = AppConfig.HEADERS.get(key, [])
+        return pd.DataFrame(columns=headers)
+
+    def _ensure_cols(self, df: pd.DataFrame, key: str) -> pd.DataFrame:
+        headers = AppConfig.HEADERS.get(key, [])
         out = df.copy()
-        for k, v in AppConfig.OCR_DEFAULTS_PC.items():
-            if k not in out.columns:
-                out[k] = v
-            else:
-                out[k] = out[k].replace("", v)
-        for k, v in AppConfig.OCR_DEFAULTS_MOBILE.items():
-            if k not in out.columns:
-                out[k] = v
-            else:
-                out[k] = out[k].replace("", v)
+
+        out = out.loc[:, ~out.columns.duplicated()]
+
+        for c in headers:
+            if c not in out.columns:
+                out[c] = ""
+
+        if headers:
+            out = out[headers].copy()
+
         return out
 
-    def _bootstrap_settings_if_needed(self) -> None:
-        try:
-            df = self.gs.load_df("SETTINGS")
-        except Exception:
-            return
+    def _truthy_series(self, s: pd.Series) -> pd.Series:
+        return s.apply(U.truthy)
 
-        if df is not None and not df.empty:
+    def _to_num_series(self, s: pd.Series, default: float = 0.0) -> pd.Series:
+        return U.to_num_series(s, default)
+
+    # =========================
+    # Settings
+    # =========================
+    def _bootstrap_settings_if_empty(self) -> None:
+        df = self.gs.load_df("SETTINGS")
+        df = df.loc[:, ~df.columns.duplicated()]
+
+        if not df.empty:
             return
 
         row = {c: "" for c in AppConfig.HEADERS["SETTINGS"]}
-        row["Project_Name"] = AppConfig.PROJECT["PERSONAL"]
-        row["Net_Factor"] = AppConfig.FACTOR["MASTER"]
+        row["Project_Name"] = "PERSONAL"
+        row["Net_Factor"] = str(AppConfig.FACTOR["MASTER"])
         row["IsCompound"] = "TRUE"
-        row["Compound_Timing"] = AppConfig.COMPOUND["DAILY"]
-        row["Active"] = "TRUE"
+        row["Compound_Timing"] = "none"
         row["UpdatedAt_JST"] = U.fmt_dt(U.now_jst())
-        for k, v in AppConfig.OCR_DEFAULTS_PC.items():
-            row[k] = v
-        for k, v in AppConfig.OCR_DEFAULTS_MOBILE.items():
-            row[k] = v
+        row["Active"] = "TRUE"
 
         self.gs.write_df("SETTINGS", pd.DataFrame([row]))
         self.gs.clear_cache()
 
     def load_settings(self) -> pd.DataFrame:
-        self._bootstrap_settings_if_needed()
-        try:
-            df = self.gs.load_df("SETTINGS")
-        except Exception as e:
-            st.error(str(e))
-            return pd.DataFrame(columns=AppConfig.HEADERS["SETTINGS"])
+        self._bootstrap_settings_if_empty()
 
+        df = self.gs.load_df("SETTINGS")
         if df.empty:
-            return pd.DataFrame(columns=AppConfig.HEADERS["SETTINGS"])
+            return self._empty_df("SETTINGS")
 
-        for c in AppConfig.HEADERS["SETTINGS"]:
-            if c not in df.columns:
-                df[c] = ""
+        df = self._ensure_cols(df, "SETTINGS")
 
-        df = df[AppConfig.HEADERS["SETTINGS"]].copy()
         df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
         df = df[df["Project_Name"] != ""].copy()
-        df["Net_Factor"] = U.to_num_series(df["Net_Factor"], AppConfig.FACTOR["MASTER"])
-        df.loc[df["Net_Factor"] <= 0, "Net_Factor"] = AppConfig.FACTOR["MASTER"]
-        df["IsCompound"] = U.truthy_series(df["IsCompound"])
-        df["Compound_Timing"] = df["Compound_Timing"].apply(U.normalize_compound)
-        df["Active"] = df["Active"].apply(lambda x: U.truthy(x) if str(x).strip() else True)
+
+        df["Net_Factor"] = self._to_num_series(df["Net_Factor"], AppConfig.FACTOR["MASTER"])
+        df["IsCompound"] = self._truthy_series(df["IsCompound"])
+        df["Compound_Timing"] = df["Compound_Timing"].astype(str).str.strip().str.lower()
         df["UpdatedAt_JST"] = df["UpdatedAt_JST"].astype(str).str.strip()
+        df["Active"] = self._truthy_series(df["Active"])
 
-        for k, v in AppConfig.OCR_DEFAULTS_PC.items():
-            df[k] = df[k].apply(lambda x, default=v: U.to_ratio(x, default))
-        for k, v in AppConfig.OCR_DEFAULTS_MOBILE.items():
-            df[k] = df[k].apply(lambda x, default=v: U.to_ratio(x, default))
-
-        personal_df = df[df["Project_Name"].str.upper() == AppConfig.PROJECT["PERSONAL"]].tail(1).copy()
-        other_df = df[df["Project_Name"].str.upper() != AppConfig.PROJECT["PERSONAL"]].drop_duplicates(subset=["Project_Name"], keep="last")
-        out = pd.concat([personal_df, other_df], ignore_index=True)
-
-        if AppConfig.PROJECT["PERSONAL"] not in out["Project_Name"].astype(str).tolist():
-            out = pd.concat(
-                [
-                    pd.DataFrame([
-                        {
-                            "Project_Name": AppConfig.PROJECT["PERSONAL"],
-                            "Net_Factor": AppConfig.FACTOR["MASTER"],
-                            "IsCompound": True,
-                            "Compound_Timing": AppConfig.COMPOUND["DAILY"],
-                            "Crop_Left_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Left_Ratio_PC"],
-                            "Crop_Top_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Top_Ratio_PC"],
-                            "Crop_Right_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Right_Ratio_PC"],
-                            "Crop_Bottom_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Bottom_Ratio_PC"],
-                            "Crop_Left_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Left_Ratio_Mobile"],
-                            "Crop_Top_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Top_Ratio_Mobile"],
-                            "Crop_Right_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Right_Ratio_Mobile"],
-                            "Crop_Bottom_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Bottom_Ratio_Mobile"],
-                            "UpdatedAt_JST": U.fmt_dt(U.now_jst()),
-                            "Active": True,
-                        }
-                    ]),
-                    out,
-                ],
-                ignore_index=True,
-            )
-        return self._ensure_setting_defaults(out)
+        return df.reset_index(drop=True)
 
     def write_settings(self, df: pd.DataFrame) -> None:
-        out = df.copy()
-        for c in AppConfig.HEADERS["SETTINGS"]:
-            if c not in out.columns:
-                out[c] = ""
-        out = out[AppConfig.HEADERS["SETTINGS"]].copy()
+        out = self._ensure_cols(df, "SETTINGS").copy()
+
         out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
         out = out[out["Project_Name"] != ""].copy()
-        out["Net_Factor"] = U.to_num_series(out["Net_Factor"], AppConfig.FACTOR["MASTER"]).map(lambda x: f"{float(x):.2f}")
+
+        out["Net_Factor"] = self._to_num_series(out["Net_Factor"], AppConfig.FACTOR["MASTER"])
         out["IsCompound"] = out["IsCompound"].apply(lambda x: "TRUE" if U.truthy(x) else "FALSE")
-        out["Compound_Timing"] = out["Compound_Timing"].apply(U.normalize_compound)
-        for k, v in AppConfig.OCR_DEFAULTS_PC.items():
-            out[k] = out[k].apply(lambda x, default=v: f"{U.to_ratio(x, default):.3f}")
-        for k, v in AppConfig.OCR_DEFAULTS_MOBILE.items():
-            out[k] = out[k].apply(lambda x, default=v: f"{U.to_ratio(x, default):.3f}")
+        out["Compound_Timing"] = out["Compound_Timing"].astype(str).str.strip().str.lower()
+        out["UpdatedAt_JST"] = out["UpdatedAt_JST"].astype(str).replace("", U.fmt_dt(U.now_jst()))
         out["Active"] = out["Active"].apply(lambda x: "TRUE" if U.truthy(x) else "FALSE")
-        out["UpdatedAt_JST"] = out["UpdatedAt_JST"].astype(str)
+
         self.gs.write_df("SETTINGS", out)
+        self.gs.clear_cache()
 
-    def repair_settings(self, settings_df: pd.DataFrame) -> pd.DataFrame:
-        repaired = settings_df.copy()
-        before_count = len(repaired)
-        if repaired.empty:
-            repaired = pd.DataFrame(columns=AppConfig.HEADERS["SETTINGS"])
-        for c in AppConfig.HEADERS["SETTINGS"]:
-            if c not in repaired.columns:
-                repaired[c] = ""
-        repaired = self._ensure_setting_defaults(repaired)
-        repaired["Project_Name"] = repaired["Project_Name"].astype(str).str.strip()
-        repaired = repaired[repaired["Project_Name"] != ""].copy()
-        personal_df = repaired[repaired["Project_Name"].str.upper() == AppConfig.PROJECT["PERSONAL"]].tail(1).copy()
-        other_df = repaired[repaired["Project_Name"].str.upper() != AppConfig.PROJECT["PERSONAL"]].drop_duplicates(subset=["Project_Name"], keep="last")
-        repaired = pd.concat([personal_df, other_df], ignore_index=True)
-        repaired["Net_Factor"] = U.to_num_series(repaired["Net_Factor"], AppConfig.FACTOR["MASTER"])
-        repaired.loc[repaired["Net_Factor"] <= 0, "Net_Factor"] = AppConfig.FACTOR["MASTER"]
-        repaired["IsCompound"] = repaired["IsCompound"].apply(U.truthy)
-        repaired["Compound_Timing"] = repaired["Compound_Timing"].apply(U.normalize_compound)
-        repaired["Active"] = repaired["Active"].apply(lambda x: U.truthy(x) if str(x).strip() else True)
-        repaired["UpdatedAt_JST"] = repaired["UpdatedAt_JST"].astype(str) if "UpdatedAt_JST" in repaired.columns else ""
-        for k, v in AppConfig.OCR_DEFAULTS_PC.items():
-            repaired[k] = repaired[k].apply(lambda x, default=v: U.to_ratio(x, default))
-        for k, v in AppConfig.OCR_DEFAULTS_MOBILE.items():
-            repaired[k] = repaired[k].apply(lambda x, default=v: U.to_ratio(x, default))
-        if AppConfig.PROJECT["PERSONAL"] not in repaired["Project_Name"].astype(str).tolist():
-            repaired = pd.concat(
-                [
-                    pd.DataFrame([
-                        {
-                            "Project_Name": AppConfig.PROJECT["PERSONAL"],
-                            "Net_Factor": AppConfig.FACTOR["MASTER"],
-                            "IsCompound": True,
-                            "Compound_Timing": AppConfig.COMPOUND["DAILY"],
-                            "Crop_Left_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Left_Ratio_PC"],
-                            "Crop_Top_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Top_Ratio_PC"],
-                            "Crop_Right_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Right_Ratio_PC"],
-                            "Crop_Bottom_Ratio_PC": AppConfig.OCR_DEFAULTS_PC["Crop_Bottom_Ratio_PC"],
-                            "Crop_Left_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Left_Ratio_Mobile"],
-                            "Crop_Top_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Top_Ratio_Mobile"],
-                            "Crop_Right_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Right_Ratio_Mobile"],
-                            "Crop_Bottom_Ratio_Mobile": AppConfig.OCR_DEFAULTS_MOBILE["Crop_Bottom_Ratio_Mobile"],
-                            "UpdatedAt_JST": U.fmt_dt(U.now_jst()),
-                            "Active": True,
-                        }
-                    ]),
-                    repaired,
-                ],
-                ignore_index=True,
-            )
-        need_write = len(repaired) != before_count or settings_df.empty
-        try:
-            left = repaired[AppConfig.HEADERS["SETTINGS"]].astype(str).reset_index(drop=True)
-            right = settings_df.reindex(columns=AppConfig.HEADERS["SETTINGS"]).astype(str).reset_index(drop=True)
-            if not left.equals(right):
-                need_write = True
-        except Exception:
-            need_write = True
-        if need_write:
-            self.write_settings(repaired)
-            self.gs.clear_cache()
-            repaired = self.load_settings()
-        return repaired
-
+    # =========================
+    # Members
+    # =========================
     def load_members(self) -> pd.DataFrame:
-        try:
-            df = self.gs.load_df("MEMBERS")
-        except Exception as e:
-            st.error(str(e))
-            return pd.DataFrame(columns=AppConfig.HEADERS["MEMBERS"])
+        df = self.gs.load_df("MEMBERS")
         if df.empty:
-            return pd.DataFrame(columns=AppConfig.HEADERS["MEMBERS"])
-        for c in AppConfig.HEADERS["MEMBERS"]:
-            if c not in df.columns:
-                df[c] = ""
+            return self._empty_df("MEMBERS")
+
+        df = self._ensure_cols(df, "MEMBERS")
+
         df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
         df["PersonName"] = df["PersonName"].astype(str).str.strip()
-        df["Principal"] = U.to_num_series(df["Principal"])
+        df["Principal"] = self._to_num_series(df["Principal"], 0.0)
         df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
         df["LINE_DisplayName"] = df["LINE_DisplayName"].astype(str).str.strip()
-        df["Rank"] = df["Rank"].apply(U.normalize_rank)
-        df["IsActive"] = df["IsActive"].apply(U.truthy)
-        return df
+        df["Rank"] = df["Rank"].astype(str).str.strip()
+        df["IsActive"] = self._truthy_series(df["IsActive"])
+        df["CreatedAt_JST"] = df["CreatedAt_JST"].astype(str).str.strip()
+        df["UpdatedAt_JST"] = df["UpdatedAt_JST"].astype(str).str.strip()
 
-    def write_members(self, members_df: pd.DataFrame) -> None:
-        out = members_df.copy()
-        out["Principal"] = U.to_num_series(out["Principal"]).map(lambda x: f"{float(x):.6f}")
+        return df.reset_index(drop=True)
+
+    def write_members(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "MEMBERS").copy()
+
+        out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
+        out["PersonName"] = out["PersonName"].astype(str).str.strip()
+        out["Principal"] = self._to_num_series(out["Principal"], 0.0)
+        out["Line_User_ID"] = out["Line_User_ID"].astype(str).str.strip()
+        out["LINE_DisplayName"] = out["LINE_DisplayName"].astype(str).str.strip()
+        out["Rank"] = out["Rank"].astype(str).str.strip()
         out["IsActive"] = out["IsActive"].apply(lambda x: "TRUE" if U.truthy(x) else "FALSE")
-        out["Rank"] = out["Rank"].apply(U.normalize_rank)
+        out["CreatedAt_JST"] = out["CreatedAt_JST"].astype(str)
+        out["UpdatedAt_JST"] = out["UpdatedAt_JST"].astype(str)
+
         self.gs.write_df("MEMBERS", out)
+        self.gs.clear_cache()
 
+    # =========================
+    # Ledger
+    # =========================
     def load_ledger(self) -> pd.DataFrame:
-        try:
-            df = self.gs.load_df("LEDGER")
-        except Exception as e:
-            st.error(str(e))
-            return pd.DataFrame(columns=AppConfig.HEADERS["LEDGER"])
+        df = self.gs.load_df("LEDGER")
         if df.empty:
-            return pd.DataFrame(columns=AppConfig.HEADERS["LEDGER"])
-        for c in AppConfig.HEADERS["LEDGER"]:
-            if c not in df.columns:
-                df[c] = ""
-        df["Amount"] = U.to_num_series(df["Amount"])
-        return df
+            return self._empty_df("LEDGER")
 
-    def load_line_users(self) -> pd.DataFrame:
-        try:
-            df = self.gs.load_df("LINEUSERS")
-        except Exception as e:
-            st.error(str(e))
-            return pd.DataFrame(columns=AppConfig.HEADERS["LINEUSERS"])
-        if df.empty:
-            return pd.DataFrame(columns=AppConfig.HEADERS["LINEUSERS"])
-        if "Line_User_ID" not in df.columns and "LineID" in df.columns:
-            df = df.rename(columns={"LineID": "Line_User_ID"})
-        if "Line_User" not in df.columns and "LINE_DisplayName" in df.columns:
-            df = df.rename(columns={"LINE_DisplayName": "Line_User"})
-        if "Line_User_ID" not in df.columns:
-            df["Line_User_ID"] = ""
-        if "Line_User" not in df.columns:
-            df["Line_User"] = ""
+        df = self._ensure_cols(df, "LEDGER")
+
+        df["Datetime_JST"] = df["Datetime_JST"].astype(str).str.strip()
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["PersonName"] = df["PersonName"].astype(str).str.strip()
+        df["Type"] = df["Type"].astype(str).str.strip()
+        df["Amount"] = self._to_num_series(df["Amount"], 0.0)
+        df["Note"] = df["Note"].astype(str).str.strip()
+        df["Evidence_URL"] = df["Evidence_URL"].astype(str).str.strip()
         df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
-        df["Line_User"] = df["Line_User"].astype(str).str.strip()
-        return df
+        df["LINE_DisplayName"] = df["LINE_DisplayName"].astype(str).str.strip()
+        df["Source"] = df["Source"].astype(str).str.strip()
 
-    def write_apr_summary(self, summary_df: pd.DataFrame) -> None:
-        if summary_df.empty:
-            return
-        out = summary_df.copy()
-        out["Date_JST"] = out["Date_JST"].astype(str)
-        out["PersonName"] = out["PersonName"].astype(str)
-        out["Total_APR"] = U.to_num_series(out["Total_APR"]).map(lambda x: f"{float(x):.6f}")
-        out["APR_Count"] = U.to_num_series(out["APR_Count"]).astype(int).astype(str)
-        out["Asset_Ratio"] = out["Asset_Ratio"].astype(str)
+        return df.reset_index(drop=True)
+
+    def write_ledger(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "LEDGER").copy()
+
+        out["Datetime_JST"] = out["Datetime_JST"].astype(str)
+        out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
+        out["PersonName"] = out["PersonName"].astype(str).str.strip()
+        out["Type"] = out["Type"].astype(str).str.strip()
+        out["Amount"] = self._to_num_series(out["Amount"], 0.0)
+        out["Note"] = out["Note"].astype(str)
+        out["Evidence_URL"] = out["Evidence_URL"].astype(str)
+        out["Line_User_ID"] = out["Line_User_ID"].astype(str)
         out["LINE_DisplayName"] = out["LINE_DisplayName"].astype(str)
-        self.gs.write_df("APR_SUMMARY", out)
+        out["Source"] = out["Source"].astype(str)
 
-    def append_ledger(self, dt_jst: str, project: str, person_name: str, typ: str, amount: float, note: str,
-                      evidence_url: str = "", line_user_id: str = "", line_display_name: str = "",
-                      source: str = AppConfig.SOURCE["APP"]) -> None:
-        if not str(project).strip():
-            raise ValueError("project が空です")
-        if not str(person_name).strip():
-            raise ValueError("person_name が空です")
-        if not str(typ).strip():
-            raise ValueError("typ が空です")
+        self.gs.write_df("LEDGER", out)
+        self.gs.clear_cache()
+
+    def append_ledger(
+        self,
+        dt_jst: str,
+        project: str,
+        person_name: str,
+        typ: str,
+        amount: float,
+        note: str,
+        evidence_url: str = "",
+        line_user_id: str = "",
+        line_display_name: str = "",
+        source: str = "APP",
+    ) -> None:
         self.gs.append_row(
             "LEDGER",
-            [dt_jst, project, person_name, typ, float(amount), note, evidence_url or "", line_user_id or "", line_display_name or "", source],
+            [
+                dt_jst,
+                str(project).strip(),
+                str(person_name).strip(),
+                str(typ).strip(),
+                float(amount),
+                str(note).strip(),
+                str(evidence_url).strip(),
+                str(line_user_id).strip(),
+                str(line_display_name).strip(),
+                str(source).strip(),
+            ],
         )
+        self.gs.clear_cache()
 
-    def append_smartvault_history(self, dt_jst: str, project: str, liquidity: float, yesterday_profit: float, apr: float,
-                                  source_mode: str, ocr_liquidity: Optional[float], ocr_yesterday_profit: Optional[float],
-                                  ocr_apr: Optional[float], evidence_url: str, admin_name: str, admin_namespace: str,
-                                  note: str = "") -> None:
+    # =========================
+    # LineUsers
+    # =========================
+    def load_line_users(self) -> pd.DataFrame:
+        df = self.gs.load_df("LINEUSERS")
+        if df.empty:
+            return self._empty_df("LINEUSERS")
+
+        df = self._ensure_cols(df, "LINEUSERS")
+
+        df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
+        df["Line_User"] = df["Line_User"].astype(str).str.strip()
+
+        return df.reset_index(drop=True)
+
+    def write_line_users(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "LINEUSERS").copy()
+        out["Line_User_ID"] = out["Line_User_ID"].astype(str).str.strip()
+        out["Line_User"] = out["Line_User"].astype(str).str.strip()
+
+        self.gs.write_df("LINEUSERS", out)
+        self.gs.clear_cache()
+
+    # =========================
+    # APR Summary
+    # =========================
+    def load_apr_summary(self) -> pd.DataFrame:
+        df = self.gs.load_df("APR_SUMMARY")
+        if df.empty:
+            return self._empty_df("APR_SUMMARY")
+
+        df = self._ensure_cols(df, "APR_SUMMARY")
+
+        df["Date_JST"] = df["Date_JST"].astype(str).str.strip()
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["PersonName"] = df["PersonName"].astype(str).str.strip()
+        df["Total_APR"] = self._to_num_series(df["Total_APR"], 0.0)
+        df["APR_Count"] = self._to_num_series(df["APR_Count"], 0.0).astype(int)
+        df["Asset_Ratio"] = df["Asset_Ratio"].astype(str).str.strip()
+        df["LINE_DisplayName"] = df["LINE_DisplayName"].astype(str).str.strip()
+
+        return df.reset_index(drop=True)
+
+    def write_apr_summary(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "APR_SUMMARY").copy()
+
+        out["Date_JST"] = out["Date_JST"].astype(str)
+        out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
+        out["PersonName"] = out["PersonName"].astype(str).str.strip()
+        out["Total_APR"] = self._to_num_series(out["Total_APR"], 0.0)
+        out["APR_Count"] = self._to_num_series(out["APR_Count"], 0.0).astype(int)
+        out["Asset_Ratio"] = out["Asset_Ratio"].astype(str)
+        out["LINE_DisplayName"] = out["LINE_DisplayName"].astype(str)
+
+        self.gs.write_df("APR_SUMMARY", out)
+        self.gs.clear_cache()
+
+    # =========================
+    # SmartVault History
+    # =========================
+    def load_smartvault_history(self) -> pd.DataFrame:
+        df = self.gs.load_df("SMARTVAULT_HISTORY")
+        if df.empty:
+            return self._empty_df("SMARTVAULT_HISTORY")
+
+        df = self._ensure_cols(df, "SMARTVAULT_HISTORY")
+
+        df["Datetime_JST"] = df["Datetime_JST"].astype(str).str.strip()
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["Liquidity"] = self._to_num_series(df["Liquidity"], 0.0)
+        df["Yesterday_Profit"] = self._to_num_series(df["Yesterday_Profit"], 0.0)
+        df["APR"] = self._to_num_series(df["APR"], 0.0)
+        df["Source_Mode"] = df["Source_Mode"].astype(str).str.strip()
+        df["OCR_Liquidity"] = self._to_num_series(df["OCR_Liquidity"], 0.0)
+        df["OCR_Yesterday_Profit"] = self._to_num_series(df["OCR_Yesterday_Profit"], 0.0)
+        df["OCR_APR"] = self._to_num_series(df["OCR_APR"], 0.0)
+        df["Evidence_URL"] = df["Evidence_URL"].astype(str).str.strip()
+        df["Admin_Name"] = df["Admin_Name"].astype(str).str.strip()
+        df["Admin_Namespace"] = df["Admin_Namespace"].astype(str).str.strip()
+        df["Note"] = df["Note"].astype(str).str.strip()
+
+        return df.reset_index(drop=True)
+
+    def append_smartvault_history(
+        self,
+        dt_jst: str,
+        project: str,
+        liquidity: float,
+        yesterday_profit: float,
+        apr: float,
+        source_mode: str,
+        ocr_liquidity: Optional[float],
+        ocr_yesterday_profit: Optional[float],
+        ocr_apr: Optional[float],
+        evidence_url: str,
+        admin_name: str,
+        admin_namespace: str,
+        note: str = "",
+    ) -> None:
         self.gs.append_row(
             "SMARTVAULT_HISTORY",
             [
-                dt_jst, project, float(liquidity), float(yesterday_profit), float(apr), str(source_mode),
+                str(dt_jst).strip(),
+                str(project).strip(),
+                float(liquidity),
+                float(yesterday_profit),
+                float(apr),
+                str(source_mode).strip(),
                 "" if ocr_liquidity is None else float(ocr_liquidity),
                 "" if ocr_yesterday_profit is None else float(ocr_yesterday_profit),
-                "" if ocr_apr is None else float(ocr_apr), evidence_url or "", admin_name or "", admin_namespace or "", note or "",
+                "" if ocr_apr is None else float(ocr_apr),
+                str(evidence_url).strip(),
+                str(admin_name).strip(),
+                str(admin_namespace).strip(),
+                str(note).strip(),
             ],
         )
+        self.gs.clear_cache()
 
-    def active_projects(self, settings_df: pd.DataFrame) -> List[str]:
+    # =========================
+    # OCR Transaction
+    # =========================
+    def load_ocr_transaction(self) -> pd.DataFrame:
+        df = self.gs.load_df("OCR_TRANSACTION")
+        if df.empty:
+            return self._empty_df("OCR_TRANSACTION")
+
+        df = self._ensure_cols(df, "OCR_TRANSACTION")
+
+        df["Datetime_JST"] = df["Datetime_JST"].astype(str).str.strip()
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["Row_No"] = self._to_num_series(df["Row_No"], 0.0).astype(int)
+        df["Date_Label"] = df["Date_Label"].astype(str).str.strip()
+        df["Time_Label"] = df["Time_Label"].astype(str).str.strip()
+        df["Type_Label"] = df["Type_Label"].astype(str).str.strip()
+        df["Amount_USD"] = self._to_num_series(df["Amount_USD"], 0.0)
+        df["Raw_Text"] = df["Raw_Text"].astype(str).str.strip()
+        df["CreatedAt_JST"] = df["CreatedAt_JST"].astype(str).str.strip()
+
+        return df.reset_index(drop=True)
+
+    def write_ocr_transaction(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "OCR_TRANSACTION").copy()
+
+        out["Datetime_JST"] = out["Datetime_JST"].astype(str)
+        out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
+        out["Row_No"] = self._to_num_series(out["Row_No"], 0.0).astype(int)
+        out["Date_Label"] = out["Date_Label"].astype(str)
+        out["Time_Label"] = out["Time_Label"].astype(str)
+        out["Type_Label"] = out["Type_Label"].astype(str)
+        out["Amount_USD"] = self._to_num_series(out["Amount_USD"], 0.0)
+        out["Raw_Text"] = out["Raw_Text"].astype(str)
+        out["CreatedAt_JST"] = out["CreatedAt_JST"].astype(str)
+
+        self.gs.write_df("OCR_TRANSACTION", out)
+        self.gs.clear_cache()
+
+    # =========================
+    # OCR Transaction History
+    # =========================
+    def load_ocr_transaction_history(self) -> pd.DataFrame:
+        df = self.gs.load_df("OCR_TRANSACTION_HISTORY")
+        if df.empty:
+            return self._empty_df("OCR_TRANSACTION_HISTORY")
+
+        df = self._ensure_cols(df, "OCR_TRANSACTION_HISTORY")
+
+        df["Unique_Key"] = df["Unique_Key"].astype(str).str.strip()
+        df["Date_Label"] = df["Date_Label"].astype(str).str.strip()
+        df["Time_Label"] = df["Time_Label"].astype(str).str.strip()
+        df["Type_Label"] = df["Type_Label"].astype(str).str.strip()
+        df["Amount_USD"] = self._to_num_series(df["Amount_USD"], 0.0)
+        df["Token_Amount"] = df["Token_Amount"].astype(str).str.strip()
+        df["Token_Symbol"] = df["Token_Symbol"].astype(str).str.strip()
+        df["Source_Image"] = df["Source_Image"].astype(str).str.strip()
+        df["Source_Project"] = df["Source_Project"].astype(str).str.strip()
+        df["OCR_Raw_Text"] = df["OCR_Raw_Text"].astype(str).str.strip()
+        df["CreatedAt_JST"] = df["CreatedAt_JST"].astype(str).str.strip()
+
+        return df.reset_index(drop=True)
+
+    def write_ocr_transaction_history(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "OCR_TRANSACTION_HISTORY").copy()
+
+        out["Unique_Key"] = out["Unique_Key"].astype(str)
+        out["Date_Label"] = out["Date_Label"].astype(str)
+        out["Time_Label"] = out["Time_Label"].astype(str)
+        out["Type_Label"] = out["Type_Label"].astype(str)
+        out["Amount_USD"] = self._to_num_series(out["Amount_USD"], 0.0)
+        out["Token_Amount"] = out["Token_Amount"].astype(str)
+        out["Token_Symbol"] = out["Token_Symbol"].astype(str)
+        out["Source_Image"] = out["Source_Image"].astype(str)
+        out["Source_Project"] = out["Source_Project"].astype(str)
+        out["OCR_Raw_Text"] = out["OCR_Raw_Text"].astype(str)
+        out["CreatedAt_JST"] = out["CreatedAt_JST"].astype(str)
+
+        self.gs.write_df("OCR_TRANSACTION_HISTORY", out)
+        self.gs.clear_cache()
+
+    # =========================
+    # APR Auto Queue
+    # =========================
+    def load_apr_auto_queue(self) -> pd.DataFrame:
+        df = self.gs.load_df("APR_AUTO_QUEUE")
+        if df.empty:
+            return self._empty_df("APR_AUTO_QUEUE")
+
+        df = self._ensure_cols(df, "APR_AUTO_QUEUE")
+
+        df["CreatedAt_JST"] = df["CreatedAt_JST"].astype(str).str.strip()
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["PersonName"] = df["PersonName"].astype(str).str.strip()
+        df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
+        df["LINE_DisplayName"] = df["LINE_DisplayName"].astype(str).str.strip()
+        df["APR"] = self._to_num_series(df["APR"], 0.0)
+        df["DailyAPR"] = self._to_num_series(df["DailyAPR"], 0.0)
+        df["Status"] = df["Status"].astype(str).str.strip()
+        df["Note"] = df["Note"].astype(str).str.strip()
+
+        return df.reset_index(drop=True)
+
+    def write_apr_auto_queue(self, df: pd.DataFrame) -> None:
+        out = self._ensure_cols(df, "APR_AUTO_QUEUE").copy()
+
+        out["CreatedAt_JST"] = out["CreatedAt_JST"].astype(str)
+        out["Project_Name"] = out["Project_Name"].astype(str)
+        out["PersonName"] = out["PersonName"].astype(str)
+        out["Line_User_ID"] = out["Line_User_ID"].astype(str)
+        out["LINE_DisplayName"] = out["LINE_DisplayName"].astype(str)
+        out["APR"] = self._to_num_series(out["APR"], 0.0)
+        out["DailyAPR"] = self._to_num_series(out["DailyAPR"], 0.0)
+        out["Status"] = out["Status"].astype(str)
+        out["Note"] = out["Note"].astype(str)
+
+        self.gs.write_df("APR_AUTO_QUEUE", out)
+        self.gs.clear_cache()
+
+    # =========================
+    # 検索 / 集計補助
+    # =========================
+    def active_projects(self, settings_df: pd.DataFrame) -> list[str]:
         if settings_df.empty:
             return []
-        return settings_df.loc[settings_df["Active"] == True, "Project_Name"].dropna().astype(str).unique().tolist()
+        df = settings_df.copy()
+        df = df[df["Active"] == True].copy()
+        return df["Project_Name"].dropna().astype(str).str.strip().tolist()
 
     def project_members_active(self, members_df: pd.DataFrame, project: str) -> pd.DataFrame:
         if members_df.empty:
-            return members_df.copy()
-        return members_df[(members_df["Project_Name"] == str(project)) & (members_df["IsActive"] == True)].copy().reset_index(drop=True)
+            return self._empty_df("MEMBERS")
+
+        df = members_df.copy()
+        df = df[df["Project_Name"].astype(str).str.strip() == str(project).strip()].copy()
+        df = df[df["IsActive"] == True].copy()
+        return df.reset_index(drop=True)
 
     def validate_no_dup_lineid(self, members_df: pd.DataFrame, project: str) -> Optional[str]:
         if members_df.empty:
             return None
-        df = members_df[members_df["Project_Name"] == str(project)].copy()
-        df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
-        df = df[df["Line_User_ID"] != ""]
-        dup = df[df.duplicated(subset=["Line_User_ID"], keep=False)]
-        return None if dup.empty else f"同一プロジェクト内で Line_User_ID が重複しています: {dup['Line_User_ID'].unique().tolist()}"
 
-    def existing_apr_keys_for_date(self, date_jst: str) -> Set[Tuple[str, str]]:
+        df = members_df.copy()
+        df = df[df["Project_Name"].astype(str).str.strip() == str(project).strip()].copy()
+        df["Line_User_ID"] = df["Line_User_ID"].astype(str).str.strip()
+        df = df[df["Line_User_ID"] != ""].copy()
+
+        dup = df[df.duplicated(subset=["Line_User_ID"], keep=False)]
+        if dup.empty:
+            return None
+
+        ids = sorted(dup["Line_User_ID"].astype(str).unique().tolist())
+        return f"同一プロジェクト内で Line_User_ID が重複しています: {', '.join(ids)}"
+
+    def existing_apr_keys_for_date(self, date_jst: str) -> set[tuple[str, str]]:
         ledger_df = self.load_ledger()
         if ledger_df.empty:
             return set()
-        df = ledger_df[(ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]) & (ledger_df["Datetime_JST"].astype(str).str.startswith(date_jst))].copy()
+
+        df = ledger_df.copy()
+        df = df[df["Type"].astype(str).str.strip() == "APR"].copy()
+        df = df[df["Datetime_JST"].astype(str).str.startswith(str(date_jst).strip())].copy()
+
         if df.empty:
             return set()
-        return set(zip(df["Project_Name"].astype(str).str.strip(), df["PersonName"].astype(str).str.strip()))
 
-    def reset_today_apr_records(self, date_jst: str, project: str) -> Tuple[int, int]:
-        ws = self.gs.ws("LEDGER")
-        values = ws.get_all_values()
-        if not values:
+        return set(
+            zip(
+                df["Project_Name"].astype(str).str.strip(),
+                df["PersonName"].astype(str).str.strip(),
+            )
+        )
+
+    def reset_today_apr_records(self, date_jst: str, project: str) -> tuple[int, int]:
+        ledger_df = self.load_ledger()
+        if ledger_df.empty:
             return 0, 0
-        headers = values[0]
-        if len(values) == 1:
-            return 0, 0
-        need_cols = ["Datetime_JST", "Project_Name", "Type", "Note"]
-        if any(c not in headers for c in need_cols):
-            return 0, 0
-        idx_dt, idx_project, idx_type, idx_note = headers.index("Datetime_JST"), headers.index("Project_Name"), headers.index("Type"), headers.index("Note")
-        kept_rows, deleted_apr, deleted_line = [headers], 0, 0
-        for row in values[1:]:
-            row = row + [""] * (len(headers) - len(row))
-            dt_v, project_v, type_v, note_v = str(row[idx_dt]).strip(), str(row[idx_project]).strip(), str(row[idx_type]).strip(), str(row[idx_note]).strip()
-            is_today = dt_v.startswith(date_jst)
-            is_project = project_v == str(project).strip()
-            delete_apr = is_today and is_project and type_v == AppConfig.TYPE["APR"]
-            delete_line = is_today and is_project and type_v == AppConfig.TYPE["LINE"] and AppConfig.APR_LINE_NOTE_KEYWORD in note_v
-            if delete_apr:
-                deleted_apr += 1
-                continue
-            if delete_line:
-                deleted_line += 1
-                continue
-            kept_rows.append(row[: len(headers)])
-        if deleted_apr > 0 or deleted_line > 0:
-            self.gs.overwrite_rows("LEDGER", kept_rows)
-            self.gs.clear_cache()
+
+        df = ledger_df.copy()
+
+        apr_mask = (
+            df["Datetime_JST"].astype(str).str.startswith(str(date_jst).strip())
+            & (df["Project_Name"].astype(str).str.strip() == str(project).strip())
+            & (df["Type"].astype(str).str.strip() == "APR")
+        )
+
+        line_mask = (
+            df["Datetime_JST"].astype(str).str.startswith(str(date_jst).strip())
+            & (df["Project_Name"].astype(str).str.strip() == str(project).strip())
+            & (df["Type"].astype(str).str.strip() == "LINE")
+        )
+
+        deleted_apr = int(apr_mask.sum())
+        deleted_line = int(line_mask.sum())
+
+        kept = df[~(apr_mask | line_mask)].copy()
+        self.write_ledger(kept)
+
         return deleted_apr, deleted_line
