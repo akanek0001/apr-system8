@@ -120,3 +120,6 @@ class U:
         out.columns = [str(c).strip() for c in out.columns]
         out = out.loc[:, ~out.columns.duplicated()]
         return out
+
+
+# END OF FILE
