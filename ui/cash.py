@@ -16,9 +16,6 @@ class CashPage:
         self.repo = repo
         self.store = store
 
-    # =========================
-    # helper
-    # =========================
     def _safe_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
@@ -66,9 +63,6 @@ class CashPage:
 
         return out
 
-    # =========================
-    # render
-    # =========================
     def render(self, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> None:
         st.title("入金 / 出金")
         st.caption(f"管理者: {AdminAuth.current_namespace()}")
@@ -97,11 +91,7 @@ class CashPage:
 
         c1, c2 = st.columns(2)
         with c1:
-            typ = st.selectbox(
-                "種別",
-                [AppConfig.TYPE["DEPOSIT"], AppConfig.TYPE["WITHDRAW"]],
-                key="cash_type",
-            )
+            typ = st.selectbox("種別", [AppConfig.TYPE["DEPOSIT"], AppConfig.TYPE["WITHDRAW"]], key="cash_type")
         with c2:
             amount = st.number_input("金額", min_value=0.0, value=0.0, step=100.0, key="cash_amount")
 
@@ -134,7 +124,6 @@ class CashPage:
             uid = str(row.get("Line_User_ID", "")).strip()
             display_name = str(row.get("LINE_DisplayName", "")).strip()
 
-            # Ledger 記録
             self.repo.append_ledger(
                 dt_jst=now_str,
                 project=str(project).strip(),
@@ -148,7 +137,6 @@ class CashPage:
                 source=AppConfig.SOURCE["APP"],
             )
 
-            # Members 更新
             new_members_df = self._write_member_balance(
                 members_df=members_df,
                 project=project,
@@ -157,7 +145,6 @@ class CashPage:
             )
             self.repo.write_members(new_members_df)
 
-            # LINE 通知
             token = ExternalService.get_line_token(AdminAuth.current_namespace())
 
             if uid:
