@@ -7,9 +7,6 @@ from core.utils import U
 
 
 class FinanceEngine:
-    # =========================
-    # 係数
-    # =========================
     def rank_factor(self, rank: str) -> float:
         r = U.normalize_rank(rank)
         if r == AppConfig.RANK["ELITE"]:
@@ -19,9 +16,6 @@ class FinanceEngine:
     def compound_mode(self, value: str) -> str:
         return U.normalize_compound(value)
 
-    # =========================
-    # PERSONAL 計算
-    # =========================
     def calc_personal_daily_apr(
         self,
         principal: float,
@@ -31,12 +25,8 @@ class FinanceEngine:
         principal = float(U.to_f(principal, 0.0))
         apr_percent = float(U.to_f(apr_percent, 0.0))
         factor = self.rank_factor(rank)
-
         return principal * (apr_percent / 100.0) * factor / 365.0
 
-    # =========================
-    # GROUP 計算
-    # =========================
     def calc_group_total_daily_apr(
         self,
         total_principal: float,
@@ -46,7 +36,6 @@ class FinanceEngine:
         total_principal = float(U.to_f(total_principal, 0.0))
         apr_percent = float(U.to_f(apr_percent, 0.0))
         net_factor = float(U.to_f(net_factor, AppConfig.FACTOR["MASTER"]))
-
         return total_principal * (apr_percent / 100.0) * net_factor / 365.0
 
     def calc_group_member_daily_apr(
@@ -57,7 +46,6 @@ class FinanceEngine:
         member_count: int,
     ) -> float:
         member_count = int(member_count or 0)
-
         if member_count <= 0:
             return 0.0
 
@@ -66,12 +54,8 @@ class FinanceEngine:
             apr_percent,
             net_factor,
         )
-
         return total_apr / member_count
 
-    # =========================
-    # メインAPR計算
-    # =========================
     def build_apr_result(
         self,
         settings_df: pd.DataFrame,
@@ -79,7 +63,6 @@ class FinanceEngine:
         project: str,
         apr_percent: float,
     ) -> pd.DataFrame:
-
         if members_df is None or members_df.empty:
             return pd.DataFrame()
 
@@ -88,7 +71,6 @@ class FinanceEngine:
 
         mdf = members_df.copy()
         mdf = mdf.loc[:, ~mdf.columns.duplicated()]
-
         mdf["Project_Name"] = mdf["Project_Name"].astype(str).str.strip()
         mdf["PersonName"] = mdf["PersonName"].astype(str).str.strip()
         mdf["Principal"] = U.to_num_series(mdf["Principal"], 0.0)
@@ -103,9 +85,6 @@ class FinanceEngine:
         if mdf.empty:
             return pd.DataFrame()
 
-        # =========================
-        # PERSONAL
-        # =========================
         if project.upper() == AppConfig.PROJECT["PERSONAL"]:
             mdf["DailyAPR"] = mdf.apply(
                 lambda r: self.calc_personal_daily_apr(
@@ -115,12 +94,8 @@ class FinanceEngine:
                 ),
                 axis=1,
             )
-
             return mdf.reset_index(drop=True)
 
-        # =========================
-        # GROUP
-        # =========================
         net_factor = float(AppConfig.FACTOR["MASTER"])
 
         if settings_df is not None and not settings_df.empty:
@@ -129,7 +104,6 @@ class FinanceEngine:
             sdf["Project_Name"] = sdf["Project_Name"].astype(str).str.strip()
 
             hit = sdf[sdf["Project_Name"] == project]
-
             if not hit.empty:
                 net_factor = float(
                     U.to_f(
@@ -149,19 +123,14 @@ class FinanceEngine:
         )
 
         mdf["DailyAPR"] = float(member_apr)
-
         return mdf.reset_index(drop=True)
 
-    # =========================
-    # Daily複利
-    # =========================
     def apply_daily_compound(
         self,
         members_df: pd.DataFrame,
         apr_df: pd.DataFrame,
         project: str,
     ) -> pd.DataFrame:
-
         if members_df is None or members_df.empty:
             return members_df.copy()
 
@@ -170,7 +139,6 @@ class FinanceEngine:
 
         out = members_df.copy()
         out = out.loc[:, ~out.columns.duplicated()]
-
         out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
         out["PersonName"] = out["PersonName"].astype(str).str.strip()
         out["Principal"] = U.to_num_series(out["Principal"], 0.0)
@@ -192,21 +160,16 @@ class FinanceEngine:
 
         return out
 
-    # =========================
-    # 月次未反映APR
-    # =========================
     def calc_monthly_pending_from_ledger(
         self,
         ledger_df: pd.DataFrame,
         project: str,
     ) -> pd.DataFrame:
-
         if ledger_df is None or ledger_df.empty:
             return pd.DataFrame(columns=["PersonName", "PendingAPR"])
 
         df = ledger_df.copy()
         df = df.loc[:, ~df.columns.duplicated()]
-
         df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
         df["PersonName"] = df["PersonName"].astype(str).str.strip()
         df["Type"] = df["Type"].astype(str).str.strip()
@@ -227,21 +190,16 @@ class FinanceEngine:
 
         return result.reset_index(drop=True)
 
-    # =========================
-    # サマリー
-    # =========================
     def build_apr_summary(
         self,
         apr_df: pd.DataFrame,
         date_jst: str,
     ) -> pd.DataFrame:
-
         if apr_df is None or apr_df.empty:
             return pd.DataFrame(columns=AppConfig.HEADERS["APR_SUMMARY"])
 
         df = apr_df.copy()
         df = df.loc[:, ~df.columns.duplicated()]
-
         df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
         df["PersonName"] = df["PersonName"].astype(str).str.strip()
         df["DailyAPR"] = U.to_num_series(df["DailyAPR"], 0.0)
