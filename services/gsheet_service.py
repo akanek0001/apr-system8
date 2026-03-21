@@ -1,138 +1,125 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, List
-
-import gspread
 import pandas as pd
 import streamlit as st
+import gspread
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import APIError
-
-from config import AppConfig
-from core.utils import U
 
 
-@dataclass
-class SheetNames:
-    SETTINGS: str
-    MEMBERS: str
-    LEDGER: str
-    LINEUSERS: str
-    APR_SUMMARY: str
-    SMARTVAULT_HISTORY: str
+# =========================
+# シート名ルール
+# =========================
+def sheet_name(base: str, namespace: str) -> str:
+    return f"{str(base).strip()}__{str(namespace).strip()}"
 
 
+# =========================
+# メインサービス
+# =========================
 class GSheetService:
-    def __init__(self, spreadsheet_id: str, namespace: str):
-        self.spreadsheet_id = spreadsheet_id
-        self.namespace = namespace
-        self.names = SheetNames(
-            SETTINGS=U.sheet_name(AppConfig.SHEET["SETTINGS"], namespace),
-            MEMBERS=U.sheet_name(AppConfig.SHEET["MEMBERS"], namespace),
-            LEDGER=U.sheet_name(AppConfig.SHEET["LEDGER"], namespace),
-            LINEUSERS=U.sheet_name(AppConfig.SHEET["LINEUSERS"], namespace),
-            APR_SUMMARY=U.sheet_name(AppConfig.SHEET["APR_SUMMARY"], namespace),
-            SMARTVAULT_HISTORY=U.sheet_name(AppConfig.SHEET["SMARTVAULT_HISTORY"], namespace),
-        )
 
-        creds_info = self._read_credentials()
+    def __init__(self, namespace: str = "A"):
+        self.namespace = namespace
+
+        self.gc = self._connect()
+        self.spreadsheet_id = self._get_spreadsheet_id()
+        self.sh = self.gc.open_by_key(self.spreadsheet_id)
+
+        # シート名定義（完全固定）
+        self.names = {
+            "SETTINGS": sheet_name("Settings", namespace),
+            "MEMBERS": sheet_name("Members", namespace),
+            "LEDGER": sheet_name("Ledger", namespace),
+            "LINEUSERS": sheet_name("LineUsers", namespace),
+            "APR_SUMMARY": sheet_name("APR_Summary", namespace),
+            "SMARTVAULT_HISTORY": sheet_name("SmartVault_History", namespace),
+            "OCR_TRANSACTION": sheet_name("OCR_Transaction", namespace),
+            "OCR_TRANSACTION_HISTORY": sheet_name("OCR_Transaction_History", namespace),
+            "APR_AUTO_QUEUE": sheet_name("APR_Auto_Queue", namespace),
+        }
+
+        if "gsheet_cache" not in st.session_state:
+            st.session_state["gsheet_cache"] = {}
+
+    # =========================
+    # 認証
+    # =========================
+    def _get_spreadsheet_id(self) -> str:
+        return st.secrets["connections"]["gsheets"]["spreadsheet"]
+
+    def _connect(self):
+        creds_dict = dict(st.secrets["connections"]["gsheets"]["credentials"])
+
         creds = Credentials.from_service_account_info(
-            creds_info,
+            creds_dict,
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive",
             ],
         )
-        self.gc = gspread.authorize(creds)
-        self.book = self.gc.open_by_key(self.spreadsheet_id)
+        return gspread.authorize(creds)
 
-        ensure_key = (
-            f"_sheet_ensured_{self.names.SETTINGS}_{self.names.MEMBERS}_{self.names.LEDGER}_"
-            f"{self.names.LINEUSERS}_{self.names.APR_SUMMARY}_{self.names.SMARTVAULT_HISTORY}"
-        )
-        if not st.session_state.get(ensure_key, False):
-            for key in AppConfig.HEADERS:
-                self.ensure_sheet(key)
-            st.session_state[ensure_key] = True
+    # =========================
+    # シート取得
+    # =========================
+    def worksheet(self, key: str):
+        name = self.names[key]
+        return self.sh.worksheet(name)
 
-    def _read_credentials(self) -> dict[str, Any]:
-        con = st.secrets.get("connections", {}).get("gsheets", {})
-        creds_info = con.get("credentials")
-        if creds_info:
-            return dict(creds_info)
+    # =========================
+    # 読み込み
+    # =========================
+    def load_df(self, key: str) -> pd.DataFrame:
 
-        legacy = st.secrets.get("gcp_service_account", {})
-        if legacy:
-            return dict(legacy)
+        cache = st.session_state["gsheet_cache"]
 
-        raise KeyError(
-            "Google Sheets の認証情報が見つかりません。"
-            " Streamlit Secrets に [connections.gsheets.credentials] を設定してください。"
-        )
-
-    def actual_name(self, key: str) -> str:
-        return getattr(self.names, key)
-
-    def ws(self, key_or_name: str):
-        name = self.actual_name(key_or_name) if hasattr(self.names, key_or_name) else key_or_name
-        return self.book.worksheet(name)
-
-    def spreadsheet_url(self) -> str:
-        return f"https://docs.google.com/spreadsheets/d/{self.spreadsheet_id}"
-
-    def ensure_sheet(self, key: str) -> None:
-        name = self.actual_name(key)
-        headers = AppConfig.HEADERS[key]
-        try:
-            ws = self.ws(key)
-        except Exception:
-            ws = self.book.add_worksheet(title=name, rows=3000, cols=max(30, len(headers) + 10))
-            ws.append_row(headers, value_input_option="USER_ENTERED")
-            return
+        if key in cache:
+            return cache[key].copy()
 
         try:
-            first = ws.row_values(1)
-        except APIError:
+            ws = self.worksheet(key)
+            values = ws.get_all_values()
+
+            if not values:
+                df = pd.DataFrame()
+            else:
+                df = pd.DataFrame(values[1:], columns=values[0])
+
+        except gspread.exceptions.WorksheetNotFound:
+            df = pd.DataFrame()
+
+        # 🔥 重複列除去（絶対必要）
+        df = df.loc[:, ~df.columns.duplicated()]
+
+        cache[key] = df.copy()
+        return df.copy()
+
+    # =========================
+    # 書き込み
+    # =========================
+    def write_df(self, key: str, df: pd.DataFrame):
+        ws = self.worksheet(key)
+
+        if df is None or df.empty:
+            ws.clear()
             return
 
-        if not first:
-            ws.append_row(headers, value_input_option="USER_ENTERED")
-            return
+        df = df.loc[:, ~df.columns.duplicated()]
 
-        colset = [str(c).strip() for c in first if str(c).strip()]
-        missing = [h for h in headers if h not in colset]
-        if missing:
-            ws.update("1:1", [colset + missing])
+        data = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
 
-    @st.cache_data(ttl=600)
-    def load_df(_self, key: str) -> pd.DataFrame:
-        try:
-            values = _self.ws(key).get_all_values()
-        except APIError as e:
-            raise RuntimeError(f"Google Sheets 読み取りエラー: {_self.actual_name(key)} を取得できません。") from e
-        except Exception as e:
-            raise RuntimeError(f"{_self.actual_name(key)} の読み取り中にエラーが発生しました: {e}") from e
-        if not values:
-            return pd.DataFrame()
-        return U.clean_cols(pd.DataFrame(values[1:], columns=values[0]))
-
-    def write_df(self, key: str, df: pd.DataFrame) -> None:
-        ws = self.ws(key)
-        out = df.fillna("").astype(str)
         ws.clear()
-        ws.update([out.columns.tolist()] + out.values.tolist(), value_input_option="USER_ENTERED")
+        ws.update(data)
 
-    def append_row(self, key: str, row: List[Any]) -> None:
-        try:
-            self.ws(key).append_row([("" if x is None else x) for x in row], value_input_option="USER_ENTERED")
-        except Exception as e:
-            raise RuntimeError(f"{self.actual_name(key)} への追記に失敗しました: {e}")
+    # =========================
+    # 追加
+    # =========================
+    def append_row(self, key: str, row: list):
+        ws = self.worksheet(key)
+        ws.append_row(row, value_input_option="USER_ENTERED")
 
-    def overwrite_rows(self, key: str, rows: List[List[Any]]) -> None:
-        ws = self.ws(key)
-        ws.clear()
-        ws.update(rows, value_input_option="USER_ENTERED")
-
-    def clear_cache(self) -> None:
-        st.cache_data.clear()
+    # =========================
+    # キャッシュクリア
+    # =========================
+    def clear_cache(self):
+        st.session_state["gsheet_cache"] = {}
