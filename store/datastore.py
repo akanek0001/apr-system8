@@ -15,23 +15,14 @@ class DataStore:
         self.repo = repo
         self.engine = engine
 
-    # =========================
-    # session key
-    # =========================
     def _key(self, name: str) -> str:
         return AppConfig.SESSION_KEYS[name]
 
-    # =========================
-    # clear
-    # =========================
     def clear(self) -> None:
         for key in AppConfig.SESSION_KEYS.values():
             if key in st.session_state:
                 del st.session_state[key]
 
-    # =========================
-    # single loaders
-    # =========================
     def load_settings(self, force: bool = False) -> pd.DataFrame:
         key = self._key("SETTINGS")
         if force or key not in st.session_state:
@@ -86,9 +77,6 @@ class DataStore:
             st.session_state[key] = self.repo.load_apr_auto_queue()
         return st.session_state[key]
 
-    # =========================
-    # all load
-    # =========================
     def load(self, force: bool = False) -> Dict[str, pd.DataFrame]:
         settings_df = self.load_settings(force=force)
         members_df = self.load_members(force=force)
@@ -112,9 +100,6 @@ class DataStore:
             "apr_auto_queue_df": apr_auto_queue_df,
         }
 
-    # =========================
-    # refresh
-    # =========================
     def refresh(self) -> Dict[str, pd.DataFrame]:
         self.repo.gs.clear_cache()
         self.clear()
@@ -123,9 +108,6 @@ class DataStore:
     def persist_and_refresh(self) -> Dict[str, pd.DataFrame]:
         return self.refresh()
 
-    # =========================
-    # APR helper
-    # =========================
     def build_apr_preview(
         self,
         project: str,
