@@ -1,93 +1,286 @@
 from __future__ import annotations
 
-from typing import Tuple
-
 import pandas as pd
 
 from config import AppConfig
 from core.utils import U
-from repository.repository import Repository
 
 
 class FinanceEngine:
-    def calc_project_apr(self, mem: pd.DataFrame, apr_percent: float, project_net_factor: float, project_name: str) -> pd.DataFrame:
-        out = mem.copy()
-        if str(project_name).strip().upper() == AppConfig.PROJECT["PERSONAL"]:
-            out["Factor"] = out["Rank"].map(U.rank_factor)
-            out["DailyAPR"] = (out["Principal"] * (apr_percent / 100.0) * out["Factor"]) / 365.0
-            out["CalcMode"] = "PERSONAL"
-            return out
-        total_principal = float(out["Principal"].sum())
-        count = len(out)
-        factor = float(project_net_factor if project_net_factor > 0 else AppConfig.FACTOR["MASTER"])
-        total_group_reward = (total_principal * (apr_percent / 100.0) * factor) / 365.0
-        out["Factor"] = factor
-        out["DailyAPR"] = (total_group_reward / count) if count > 0 else 0.0
-        out["CalcMode"] = "GROUP_EQUAL"
+    # =========================
+    # 係数
+    # =========================
+    def rank_factor(self, rank: str) -> float:
+        r = U.normalize_rank(rank)
+        if r == AppConfig.RANK["ELITE"]:
+            return float(AppConfig.FACTOR["ELITE"])
+        return float(AppConfig.FACTOR["MASTER"])
+
+    def compound_mode(self, value: str) -> str:
+        return U.normalize_compound(value)
+
+    # =========================
+    # PERSONAL 計算
+    # =========================
+    def calc_personal_daily_apr(
+        self,
+        principal: float,
+        apr_percent: float,
+        rank: str,
+    ) -> float:
+        principal = float(U.to_f(principal, 0.0))
+        apr_percent = float(U.to_f(apr_percent, 0.0))
+        factor = self.rank_factor(rank)
+
+        return principal * (apr_percent / 100.0) * factor / 365.0
+
+    # =========================
+    # GROUP 計算
+    # =========================
+    def calc_group_total_daily_apr(
+        self,
+        total_principal: float,
+        apr_percent: float,
+        net_factor: float,
+    ) -> float:
+        total_principal = float(U.to_f(total_principal, 0.0))
+        apr_percent = float(U.to_f(apr_percent, 0.0))
+        net_factor = float(U.to_f(net_factor, AppConfig.FACTOR["MASTER"]))
+
+        return total_principal * (apr_percent / 100.0) * net_factor / 365.0
+
+    def calc_group_member_daily_apr(
+        self,
+        total_principal: float,
+        apr_percent: float,
+        net_factor: float,
+        member_count: int,
+    ) -> float:
+        member_count = int(member_count or 0)
+
+        if member_count <= 0:
+            return 0.0
+
+        total_apr = self.calc_group_total_daily_apr(
+            total_principal,
+            apr_percent,
+            net_factor,
+        )
+
+        return total_apr / member_count
+
+    # =========================
+    # メインAPR計算
+    # =========================
+    def build_apr_result(
+        self,
+        settings_df: pd.DataFrame,
+        members_df: pd.DataFrame,
+        project: str,
+        apr_percent: float,
+    ) -> pd.DataFrame:
+
+        if members_df is None or members_df.empty:
+            return pd.DataFrame()
+
+        project = str(project).strip()
+        apr_percent = float(U.to_f(apr_percent, 0.0))
+
+        mdf = members_df.copy()
+        mdf = mdf.loc[:, ~mdf.columns.duplicated()]
+
+        mdf["Project_Name"] = mdf["Project_Name"].astype(str).str.strip()
+        mdf["PersonName"] = mdf["PersonName"].astype(str).str.strip()
+        mdf["Principal"] = U.to_num_series(mdf["Principal"], 0.0)
+        mdf["Rank"] = mdf["Rank"].apply(U.normalize_rank)
+        mdf["IsActive"] = mdf["IsActive"].apply(U.truthy)
+
+        mdf = mdf[
+            (mdf["Project_Name"] == project) &
+            (mdf["IsActive"] == True)
+        ].copy()
+
+        if mdf.empty:
+            return pd.DataFrame()
+
+        # =========================
+        # PERSONAL
+        # =========================
+        if project.upper() == AppConfig.PROJECT["PERSONAL"]:
+            mdf["DailyAPR"] = mdf.apply(
+                lambda r: self.calc_personal_daily_apr(
+                    r["Principal"],
+                    apr_percent,
+                    r["Rank"],
+                ),
+                axis=1,
+            )
+
+            return mdf.reset_index(drop=True)
+
+        # =========================
+        # GROUP
+        # =========================
+        net_factor = float(AppConfig.FACTOR["MASTER"])
+
+        if settings_df is not None and not settings_df.empty:
+            sdf = settings_df.copy()
+            sdf = sdf.loc[:, ~sdf.columns.duplicated()]
+            sdf["Project_Name"] = sdf["Project_Name"].astype(str).str.strip()
+
+            hit = sdf[sdf["Project_Name"] == project]
+
+            if not hit.empty:
+                net_factor = float(
+                    U.to_f(
+                        hit.iloc[0].get("Net_Factor", net_factor),
+                        net_factor,
+                    )
+                )
+
+        total_principal = float(mdf["Principal"].sum())
+        member_count = int(len(mdf))
+
+        member_apr = self.calc_group_member_daily_apr(
+            total_principal,
+            apr_percent,
+            net_factor,
+            member_count,
+        )
+
+        mdf["DailyAPR"] = float(member_apr)
+
+        return mdf.reset_index(drop=True)
+
+    # =========================
+    # Daily複利
+    # =========================
+    def apply_daily_compound(
+        self,
+        members_df: pd.DataFrame,
+        apr_df: pd.DataFrame,
+        project: str,
+    ) -> pd.DataFrame:
+
+        if members_df is None or members_df.empty:
+            return members_df.copy()
+
+        if apr_df is None or apr_df.empty:
+            return members_df.copy()
+
+        out = members_df.copy()
+        out = out.loc[:, ~out.columns.duplicated()]
+
+        out["Project_Name"] = out["Project_Name"].astype(str).str.strip()
+        out["PersonName"] = out["PersonName"].astype(str).str.strip()
+        out["Principal"] = U.to_num_series(out["Principal"], 0.0)
+
+        tmp = apr_df.copy()
+        tmp["Project_Name"] = tmp["Project_Name"].astype(str).str.strip()
+        tmp["PersonName"] = tmp["PersonName"].astype(str).str.strip()
+        tmp["DailyAPR"] = U.to_num_series(tmp["DailyAPR"], 0.0)
+
+        for _, r in tmp.iterrows():
+            mask = (
+                (out["Project_Name"] == project) &
+                (out["PersonName"] == r["PersonName"])
+            )
+
+            if mask.any():
+                out.loc[mask, "Principal"] += float(r["DailyAPR"])
+                out.loc[mask, "UpdatedAt_JST"] = U.fmt_dt(U.now_jst())
+
         return out
 
-    def build_apr_summary(self, ledger_df: pd.DataFrame, members_df: pd.DataFrame) -> pd.DataFrame:
-        if ledger_df.empty:
-            return pd.DataFrame(columns=AppConfig.HEADERS["APR_SUMMARY"])
-        apr_df = ledger_df[ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"]].copy()
-        if apr_df.empty:
-            return pd.DataFrame(columns=AppConfig.HEADERS["APR_SUMMARY"])
-        apr_df["PersonName"] = apr_df["PersonName"].astype(str).str.strip()
-        apr_df["LINE_DisplayName"] = apr_df["LINE_DisplayName"].astype(str).str.strip()
-        apr_df["Amount"] = U.to_num_series(apr_df["Amount"])
-        active_mem = members_df[members_df["IsActive"] == True].copy() if not members_df.empty and "IsActive" in members_df.columns else members_df.copy()
-        total_assets = float(active_mem["Principal"].sum()) if not active_mem.empty else 0.0
-        summary = apr_df.groupby("PersonName", as_index=False).agg(Total_APR=("Amount", "sum"), APR_Count=("Amount", "count"))
-        disp_map = apr_df.sort_values("Datetime_JST", ascending=False).drop_duplicates(subset=["PersonName"])[["PersonName", "LINE_DisplayName"]].copy()
-        summary = summary.merge(disp_map, on="PersonName", how="left")
-        summary["Date_JST"] = U.fmt_date(U.now_jst())
-        summary["Asset_Ratio"] = summary["Total_APR"].map(lambda x: f"{(float(x) / total_assets) * 100:.2f}%" if total_assets > 0 else "0.00%")
-        return summary[["Date_JST", "PersonName", "Total_APR", "APR_Count", "Asset_Ratio", "LINE_DisplayName"]].copy()
+    # =========================
+    # 月次未反映APR
+    # =========================
+    def calc_monthly_pending_from_ledger(
+        self,
+        ledger_df: pd.DataFrame,
+        project: str,
+    ) -> pd.DataFrame:
 
-    def apply_monthly_compound(self, repo: Repository, members_df: pd.DataFrame, project: str) -> Tuple[int, float]:
-        ledger_df = repo.load_ledger()
-        if ledger_df.empty:
-            return 0, 0.0
-        target = ledger_df[
-            (ledger_df["Project_Name"].astype(str).str.strip() == str(project).strip())
-            & (ledger_df["Type"].astype(str).str.strip() == AppConfig.TYPE["APR"])
-            & (~ledger_df["Note"].astype(str).str.contains("COMPOUNDED", na=False))
-        ].copy()
-        if target.empty:
-            return 0, 0.0
-        sums = target.groupby("PersonName", as_index=False)["Amount"].sum()
-        if sums.empty:
-            return 0, 0.0
-        ts = U.fmt_dt(U.now_jst())
-        updated_count, total_added = 0, 0.0
-        add_map = dict(zip(sums["PersonName"].astype(str).str.strip(), U.to_num_series(sums["Amount"])))
-        mask = (members_df["Project_Name"].astype(str).str.strip() == str(project).strip()) & (members_df["PersonName"].astype(str).str.strip().isin(add_map.keys()))
-        if mask.any():
-            for idx in members_df[mask].index.tolist():
-                person = str(members_df.loc[idx, "PersonName"]).strip()
-                addv = float(add_map.get(person, 0.0))
-                if addv == 0:
-                    continue
-                members_df.loc[idx, "Principal"] = float(members_df.loc[idx, "Principal"]) + addv
-                members_df.loc[idx, "UpdatedAt_JST"] = ts
-                updated_count += 1
-                total_added += addv
-        if updated_count > 0:
-            repo.write_members(members_df)
-            ws = repo.gs.ws("LEDGER")
-            values = ws.get_all_values()
-            if values and len(values) >= 2:
-                headers = values[0]
-                note_idx = headers.index("Note") + 1 if "Note" in headers else None
-                if note_idx:
-                    for row_no in range(2, len(values) + 1):
-                        row = values[row_no - 1]
-                        if len(row) < len(headers):
-                            row = row + [""] * (len(headers) - len(row))
-                        r_project = str(row[headers.index("Project_Name")]).strip()
-                        r_type = str(row[headers.index("Type")]).strip()
-                        r_note = str(row[headers.index("Note")]).strip()
-                        if r_project == str(project).strip() and r_type == AppConfig.TYPE["APR"] and "COMPOUNDED" not in r_note:
-                            ws.update_cell(row_no, note_idx, (r_note + " | " if r_note else "") + f"COMPOUNDED:{ts}")
-            repo.gs.clear_cache()
-        return updated_count, total_added
+        if ledger_df is None or ledger_df.empty:
+            return pd.DataFrame(columns=["PersonName", "PendingAPR"])
+
+        df = ledger_df.copy()
+        df = df.loc[:, ~df.columns.duplicated()]
+
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["PersonName"] = df["PersonName"].astype(str).str.strip()
+        df["Type"] = df["Type"].astype(str).str.strip()
+        df["Amount"] = U.to_num_series(df["Amount"], 0.0)
+
+        df = df[df["Project_Name"] == project]
+
+        apr_df = df[df["Type"] == AppConfig.TYPE["APR"]]
+        applied_df = df[df["Type"] == "APR_MONTHLY_APPLIED"]
+
+        apr_sum = apr_df.groupby("PersonName")["Amount"].sum()
+        applied_sum = applied_df.groupby("PersonName")["Amount"].sum()
+
+        result = pd.DataFrame({
+            "PersonName": apr_sum.index,
+            "PendingAPR": apr_sum.values - applied_sum.reindex(apr_sum.index, fill_value=0).values,
+        })
+
+        return result.reset_index(drop=True)
+
+    # =========================
+    # サマリー
+    # =========================
+    def build_apr_summary(
+        self,
+        apr_df: pd.DataFrame,
+        date_jst: str,
+    ) -> pd.DataFrame:
+
+        if apr_df is None or apr_df.empty:
+            return pd.DataFrame(columns=AppConfig.HEADERS["APR_SUMMARY"])
+
+        df = apr_df.copy()
+        df = df.loc[:, ~df.columns.duplicated()]
+
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["PersonName"] = df["PersonName"].astype(str).str.strip()
+        df["DailyAPR"] = U.to_num_series(df["DailyAPR"], 0.0)
+        df["Principal"] = U.to_num_series(df["Principal"], 0.0)
+
+        if "LINE_DisplayName" not in df.columns:
+            df["LINE_DisplayName"] = ""
+
+        total_principal = float(df["Principal"].sum())
+
+        grouped = df.groupby(
+            ["Project_Name", "PersonName", "LINE_DisplayName"],
+            as_index=False,
+        ).agg(
+            Total_APR=("DailyAPR", "sum"),
+            APR_Count=("DailyAPR", "count"),
+            Principal=("Principal", "sum"),
+        )
+
+        if total_principal > 0:
+            grouped["Asset_Ratio"] = grouped["Principal"].apply(
+                lambda x: f"{(float(x) / total_principal):.6f}"
+            )
+        else:
+            grouped["Asset_Ratio"] = "0.000000"
+
+        grouped["Date_JST"] = str(date_jst)
+
+        return grouped[
+            [
+                "Date_JST",
+                "Project_Name",
+                "PersonName",
+                "Total_APR",
+                "APR_Count",
+                "Asset_Ratio",
+                "LINE_DisplayName",
+            ]
+        ].reset_index(drop=True)
+
+
+# END OF FILE
