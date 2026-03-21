@@ -115,3 +115,6 @@ class AdminAuth:
         st.session_state["admin_ok"] = False
         st.session_state["admin_name"] = ""
         st.session_state["admin_namespace"] = AppConfig.DEFAULT_NAMESPACE
+
+
+# END OF FILE
