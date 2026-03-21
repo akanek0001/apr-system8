@@ -7,16 +7,49 @@ from google.oauth2.service_account import Credentials
 
 
 class GSheetService:
-    def __init__(self, spreadsheet_id: str):
-        self.spreadsheet_id = spreadsheet_id
+    def __init__(self, spreadsheet_id: str | None = None):
         self.gc = self._connect()
-        self.sh = self.gc.open_by_key(spreadsheet_id)
+        self.spreadsheet_id = self._resolve_spreadsheet_id(spreadsheet_id)
+        self.sh = self.gc.open_by_key(self.spreadsheet_id)
 
         if "gsheet_cache" not in st.session_state:
             st.session_state["gsheet_cache"] = {}
 
+    def _resolve_spreadsheet_id(self, spreadsheet_id: str | None) -> str:
+        raw = str(spreadsheet_id or "").strip()
+        if raw and raw != "YOUR_SPREADSHEET_ID":
+            return raw
+
+        try:
+            secret_id = str(st.secrets["connections"]["gsheets"]["spreadsheet"]).strip()
+            if secret_id:
+                return secret_id
+        except Exception:
+            pass
+
+        raise KeyError(
+            'Spreadsheet ID が見つかりません。'
+            ' Streamlit Secrets の [connections.gsheets] spreadsheet に設定してください。'
+        )
+
+    def _read_credentials_dict(self) -> dict:
+        try:
+            return dict(st.secrets["connections"]["gsheets"]["credentials"])
+        except Exception:
+            pass
+
+        try:
+            return dict(st.secrets["gcp_service_account"])
+        except Exception:
+            pass
+
+        raise KeyError(
+            'Google Sheets の認証情報が見つかりません。'
+            ' Streamlit Secrets の [connections.gsheets.credentials] に設定してください。'
+        )
+
     def _connect(self):
-        creds_dict = st.secrets["gcp_service_account"]
+        creds_dict = self._read_credentials_dict()
         creds = Credentials.from_service_account_info(
             creds_dict,
             scopes=[
