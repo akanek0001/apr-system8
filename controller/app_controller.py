@@ -10,7 +10,6 @@ from core.utils import U
 from engine.finance_engine import FinanceEngine
 from repository.repository import Repository
 from services.gsheet_service import GSheetService
-from services.external_service import ExternalService
 from store.datastore import DataStore
 from ui.dashboard import DashboardPage
 from ui.apr import APRPage
@@ -50,11 +49,17 @@ class AppController:
             st.caption(f"👤 {AdminAuth.current_label()}")
             if st.button("🔓 ログアウト", use_container_width=True):
                 AdminAuth.logout()
+
                 for key in AppConfig.SESSION_KEYS.values():
                     if key in st.session_state:
                         del st.session_state[key]
+
                 if "gsheet_cache" in st.session_state:
                     del st.session_state["gsheet_cache"]
+
+                if "page" in st.session_state:
+                    del st.session_state["page"]
+
                 st.rerun()
 
     def setup_state(self) -> None:
@@ -80,8 +85,6 @@ class AppController:
             st.stop()
 
         self.repo = Repository(self.gs)
-        self.repo.ensure_all_sheets()
-
         self.engine = FinanceEngine()
         self.store = DataStore(self.repo, self.engine)
 
