@@ -31,9 +31,6 @@ class AppController:
         self.admin_page: Optional[AdminPage] = None
         self.help_page: Optional[HelpPage] = None
 
-    # =========================
-    # page / auth / state
-    # =========================
     def setup_page(self) -> None:
         st.set_page_config(
             page_title=AppConfig.APP_TITLE,
@@ -69,9 +66,6 @@ class AppController:
         if "hide_line_history" not in st.session_state:
             st.session_state["hide_line_history"] = False
 
-    # =========================
-    # services
-    # =========================
     def setup_services(self) -> None:
         sid = U.extract_sheet_id(str(AppConfig.SPREADSHEET_ID).strip())
 
@@ -94,9 +88,6 @@ class AppController:
         self.admin_page = AdminPage(self.repo, self.store)
         self.help_page = HelpPage(self.repo)
 
-    # =========================
-    # sidebar
-    # =========================
     def render_sidebar_menu(self) -> None:
         with st.sidebar:
             st.markdown("### メニュー")
@@ -130,9 +121,6 @@ class AppController:
 
             st.session_state["page"] = selected
 
-    # =========================
-    # run
-    # =========================
     def run(self) -> None:
         self.setup_page()
         self.setup_auth()
