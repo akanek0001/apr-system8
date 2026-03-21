@@ -11,9 +11,6 @@ from core.auth import AdminAuth
 
 
 class ExternalService:
-    # =========================
-    # secrets
-    # =========================
     @staticmethod
     def _get_secret(*keys: str, default: str = "") -> str:
         for path in keys:
@@ -26,9 +23,6 @@ class ExternalService:
                 pass
         return default
 
-    # =========================
-    # LINE
-    # =========================
     @staticmethod
     def get_line_token(namespace: str | None = None) -> str:
         ns = str(namespace or AdminAuth.current_namespace()).strip() or "A"
@@ -71,9 +65,6 @@ class ExternalService:
         except Exception:
             return 0
 
-    # =========================
-    # ImgBB
-    # =========================
     @staticmethod
     def upload_imgbb(file_bytes: bytes | None) -> Optional[str]:
         if not file_bytes:
@@ -84,12 +75,8 @@ class ExternalService:
             return None
 
         try:
-            payload = {
-                "key": api_key,
-            }
-            files = {
-                "image": file_bytes,
-            }
+            payload = {"key": api_key}
+            files = {"image": file_bytes}
 
             resp = requests.post(
                 "https://api.imgbb.com/1/upload",
@@ -106,9 +93,6 @@ class ExternalService:
         except Exception:
             return None
 
-    # =========================
-    # OCR.space
-    # =========================
     @staticmethod
     def _ocr_api_key() -> str:
         return ExternalService._get_secret("ocrspace.api_key", "ocr.api_key", default="")
@@ -196,9 +180,6 @@ class ExternalService:
         except Exception:
             return ""
 
-    # =========================
-    # OCR helpers
-    # =========================
     @staticmethod
     def extract_number_candidates(text: str) -> list[float]:
         import re
