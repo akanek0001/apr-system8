@@ -18,9 +18,6 @@ class AdminPage:
         self.repo = repo
         self.store = store
 
-    # =========================
-    # helper
-    # =========================
     def _safe_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
@@ -57,9 +54,6 @@ class AdminPage:
         stt = U.bool_to_status(row.get("IsActive", True))
         return f"{stt} {name} / {disp}" if disp else f"{stt} {name} / {uid}"
 
-    # =========================
-    # render
-    # =========================
     def render(
         self,
         settings_df: pd.DataFrame,
@@ -88,9 +82,6 @@ class AdminPage:
         view_all = self._safe_df(view_all)
         view_all["_row_id"] = view_all.index
 
-        # =========================
-        # メンバー一覧
-        # =========================
         if not view_all.empty:
             st.subheader("現在のメンバー一覧")
 
@@ -106,9 +97,6 @@ class AdminPage:
                 hide_index=True,
             )
 
-        # =========================
-        # 個別LINE送信
-        # =========================
         st.divider()
         st.subheader("メンバーへ個別LINE送信")
 
@@ -237,9 +225,6 @@ class AdminPage:
                         with st.expander("失敗詳細", expanded=False):
                             st.write("\n".join(failed_list))
 
-        # =========================
-        # 状態切替
-        # =========================
         st.divider()
         if not view_all.empty:
             st.subheader("状態切替")
@@ -278,9 +263,6 @@ class AdminPage:
                 st.success(f"{selected_name} を {next_status} に更新しました。")
                 st.rerun()
 
-        # =========================
-        # 一括編集
-        # =========================
         st.divider()
         if not view_all.empty:
             st.subheader("一括編集")
@@ -360,17 +342,10 @@ class AdminPage:
                 st.success("保存しました。")
                 st.rerun()
 
-        # =========================
-        # 追加
-        # =========================
         st.divider()
         st.subheader("メンバー追加")
 
-        add_mode = st.selectbox(
-            "追加先",
-            ["個人(PERSONAL)", "プロジェクト"],
-            key="member_add_mode",
-        )
+        add_mode = st.selectbox("追加先", ["個人(PERSONAL)", "プロジェクト"], key="member_add_mode")
 
         if add_mode == "個人(PERSONAL)":
             selected_project = AppConfig.PROJECT["PERSONAL"]
@@ -382,11 +357,7 @@ class AdminPage:
             if not project_candidates:
                 st.warning("PERSONAL 以外のプロジェクトがありません。")
                 return
-            selected_project = st.selectbox(
-                "登録するプロジェクト",
-                project_candidates,
-                key="member_add_target_project",
-            )
+            selected_project = st.selectbox("登録するプロジェクト", project_candidates, key="member_add_target_project")
 
         if line_users:
             labels = ["（選択しない）"] + [x[0] for x in line_users]
@@ -452,9 +423,6 @@ class AdminPage:
             st.success(f"追加しました。登録先: {selected_project}")
             st.rerun()
 
-        # =========================
-        # Settings / LineUsers 表示
-        # =========================
         st.divider()
         tab1, tab2 = st.tabs(["Settings", "LineUsers"])
 
