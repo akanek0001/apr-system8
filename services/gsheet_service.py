@@ -14,17 +14,15 @@ from core.utils import U
 class GSheetService:
     def __init__(self, spreadsheet_id: Optional[str] = None, namespace: str = "A"):
         self.namespace = str(namespace).strip() or AppConfig.DEFAULT_NAMESPACE
-
         self.spreadsheet_id = self._resolve_spreadsheet_id(spreadsheet_id)
         self.gc = self._connect()
         self.sh = self.gc.open_by_key(self.spreadsheet_id)
 
-        # キャッシュ
         if "gsheet_cache" not in st.session_state:
             st.session_state["gsheet_cache"] = {}
 
     # =========================
-    # Secrets / 接続
+    # secrets / auth
     # =========================
     def _resolve_spreadsheet_id(self, spreadsheet_id: Optional[str]) -> str:
         raw = str(spreadsheet_id or "").strip()
@@ -38,7 +36,10 @@ class GSheetService:
         except Exception:
             pass
 
-        raise KeyError("Spreadsheet ID が見つかりません")
+        raise KeyError(
+            "Spreadsheet ID が見つかりません。"
+            " Streamlit Secrets の [connections.gsheets] spreadsheet に設定してください。"
+        )
 
     def _read_credentials(self) -> dict[str, Any]:
         try:
@@ -51,7 +52,10 @@ class GSheetService:
         except Exception:
             pass
 
-        raise KeyError("Google Sheets 認証情報が見つかりません")
+        raise KeyError(
+            "Google Sheets の認証情報が見つかりません。"
+            " Streamlit Secrets の [connections.gsheets.credentials] に設定してください。"
+        )
 
     def _connect(self):
         creds_dict = self._read_credentials()
@@ -63,25 +67,23 @@ class GSheetService:
                 "https://www.googleapis.com/auth/drive",
             ],
         )
-
         return gspread.authorize(creds)
 
     # =========================
-    # シート名
+    # names
     # =========================
     def sheet(self, key: str) -> str:
         base = AppConfig.SHEET[key]
         return U.sheet_name(base, self.namespace)
 
     # =========================
-    # ワークシート取得
+    # worksheet
     # =========================
     def worksheet(self, key: str):
-        name = self.sheet(key)
-        return self.sh.worksheet(name)
+        return self.sh.worksheet(self.sheet(key))
 
     # =========================
-    # 読み込み
+    # read / write
     # =========================
     def load_df(self, key: str) -> pd.DataFrame:
         cache_key = f"{self.namespace}:{key}"
@@ -101,18 +103,22 @@ class GSheetService:
 
         except gspread.exceptions.WorksheetNotFound:
             df = pd.DataFrame()
+        except gspread.exceptions.APIError as e:
+            raise RuntimeError(
+                f"シート読み取りに失敗しました: {self.sheet(key)}。"
+                f" Spreadsheet共有権限、Spreadsheet ID、API制限を確認してください。"
+            ) from e
 
-        # 🔥 重要：重複列除去
         df = df.loc[:, ~df.columns.duplicated()]
-
         cache[cache_key] = df.copy()
         return df.copy()
 
-    # =========================
-    # 書き込み
-    # =========================
-    def write_df(self, key: str, df: pd.DataFrame):
-        ws = self.worksheet(key)
+    def write_df(self, key: str, df: pd.DataFrame) -> None:
+        try:
+            ws = self.worksheet(key)
+        except gspread.exceptions.WorksheetNotFound:
+            self.ensure_sheet(key, AppConfig.HEADERS[key])
+            ws = self.worksheet(key)
 
         if df is None or df.empty:
             ws.clear()
@@ -120,56 +126,105 @@ class GSheetService:
 
         out = df.copy()
         out = out.loc[:, ~out.columns.duplicated()]
-
         data = [out.columns.tolist()] + out.fillna("").astype(str).values.tolist()
 
-        ws.clear()
-        ws.update(data)
+        try:
+            ws.clear()
+            ws.update(data)
+        except gspread.exceptions.APIError as e:
+            raise RuntimeError(
+                f"シート書き込みに失敗しました: {self.sheet(key)}。"
+                f" Spreadsheet共有権限、API制限を確認してください。"
+            ) from e
+
+    def append_row(self, key: str, row: list[Any]) -> None:
+        try:
+            ws = self.worksheet(key)
+        except gspread.exceptions.WorksheetNotFound:
+            self.ensure_sheet(key, AppConfig.HEADERS[key])
+            ws = self.worksheet(key)
+
+        try:
+            ws.append_row([("" if x is None else x) for x in row], value_input_option="USER_ENTERED")
+        except gspread.exceptions.APIError as e:
+            raise RuntimeError(
+                f"行追加に失敗しました: {self.sheet(key)}。"
+                f" Spreadsheet共有権限、API制限を確認してください。"
+            ) from e
 
     # =========================
-    # 追加
+    # ensure
     # =========================
-    def append_row(self, key: str, row: list[Any]):
-        ws = self.worksheet(key)
-        ws.append_row([("" if x is None else x) for x in row], value_input_option="USER_ENTERED")
-
-    # =========================
-    # 初期化
-    # =========================
-    def ensure_sheet(self, key: str, headers: list[str]):
+    def ensure_sheet(self, key: str, headers: list[str]) -> None:
         name = self.sheet(key)
 
         try:
             ws = self.sh.worksheet(name)
         except gspread.exceptions.WorksheetNotFound:
-            ws = self.sh.add_worksheet(title=name, rows=2000, cols=max(20, len(headers)))
-            ws.append_row(headers)
-            return
+            try:
+                ws = self.sh.add_worksheet(title=name, rows=2000, cols=max(20, len(headers)))
+                ws.append_row(headers)
+                return
+            except gspread.exceptions.APIError as e:
+                raise RuntimeError(
+                    f"シート作成に失敗しました: {name}。"
+                    f" Spreadsheet共有権限、Spreadsheet ID、API制限を確認してください。"
+                ) from e
+        except gspread.exceptions.APIError as e:
+            raise RuntimeError(
+                f"シート取得に失敗しました: {name}。"
+                f" Spreadsheet共有権限、Spreadsheet ID、API制限を確認してください。"
+            ) from e
 
-        values = ws.get_all_values()
+        try:
+            values = ws.get_all_values()
+        except gspread.exceptions.APIError as e:
+            raise RuntimeError(
+                f"シート読み取りに失敗しました: {name}。"
+                f" API制限または権限の問題の可能性があります。"
+            ) from e
 
         if not values:
             ws.append_row(headers)
             return
 
-        current = values[0]
+        current = list(values[0])
 
-        if current != headers:
+        seen = set()
+        deduped = []
+        for h in current:
+            hs = str(h).strip()
+            if hs and hs not in seen:
+                deduped.append(hs)
+                seen.add(hs)
+
+        expected = [str(h).strip() for h in headers]
+
+        if deduped != expected:
             body = values[1:] if len(values) > 1 else []
-            ws.clear()
-            ws.append_row(headers)
+            try:
+                ws.clear()
+                ws.append_row(expected)
 
-            if body:
-                normalized = []
-                for r in body:
-                    r = list(r)
-                    if len(r) < len(headers):
-                        r += [""] * (len(headers) - len(r))
-                    normalized.append(r[: len(headers)])
-                ws.append_rows(normalized)
+                if body:
+                    normalized = []
+                    for r in body:
+                        r = list(r)
+                        if len(r) < len(expected):
+                            r += [""] * (len(expected) - len(r))
+                        normalized.append(r[: len(expected)])
+                    ws.append_rows(normalized)
+            except gspread.exceptions.APIError as e:
+                raise RuntimeError(
+                    f"ヘッダー修正に失敗しました: {name}。"
+                    f" API制限または権限の問題の可能性があります。"
+                ) from e
 
     # =========================
-    # キャッシュ
+    # cache
     # =========================
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         st.session_state["gsheet_cache"] = {}
+
+
+# END OF FILE
