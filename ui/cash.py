@@ -16,78 +16,212 @@ class CashPage:
         self.repo = repo
         self.store = store
 
+    # =========================
+    # helper
+    # =========================
+    def _safe_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        out = df.copy()
+        out = out.loc[:, ~out.columns.duplicated()]
+        out.columns = [str(c).strip() for c in out.columns]
+        return out.reset_index(drop=True)
+
+    def _active_members(self, members_df: pd.DataFrame, project: str) -> pd.DataFrame:
+        if members_df is None or members_df.empty:
+            return pd.DataFrame()
+
+        df = members_df.copy()
+        df = df.loc[:, ~df.columns.duplicated()]
+        df["Project_Name"] = df["Project_Name"].astype(str).str.strip()
+        df["IsActive"] = df["IsActive"].apply(U.truthy)
+        df["Principal"] = pd.to_numeric(df["Principal"], errors="coerce").fillna(0.0)
+
+        df = df[
+            (df["Project_Name"] == str(project).strip()) &
+            (df["IsActive"] == True)
+        ].copy()
+
+        return df.reset_index(drop=True)
+
+    def _write_member_balance(
+        self,
+        members_df: pd.DataFrame,
+        project: str,
+        person: str,
+        new_balance: float,
+    ) -> pd.DataFrame:
+        out = members_df.copy()
+        out = out.loc[:, ~out.columns.duplicated()]
+
+        mask = (
+            out["Project_Name"].astype(str).str.strip() == str(project).strip()
+        ) & (
+            out["PersonName"].astype(str).str.strip() == str(person).strip()
+        )
+
+        out.loc[mask, "Principal"] = float(new_balance)
+        out.loc[mask, "UpdatedAt_JST"] = U.fmt_dt(U.now_jst())
+
+        return out
+
+    # =========================
+    # render
+    # =========================
     def render(self, settings_df: pd.DataFrame, members_df: pd.DataFrame) -> None:
-        st.subheader("💸 入金 / 出金（個別LINE通知）")
+        st.title("入金 / 出金")
+        st.caption(f"管理者: {AdminAuth.current_namespace()}")
+
+        settings_df = self._safe_df(settings_df)
+        members_df = self._safe_df(members_df)
+
         projects = self.repo.active_projects(settings_df)
         if not projects:
             st.warning("有効なプロジェクトがありません。")
             return
 
         project = st.selectbox("プロジェクト", projects, key="cash_project")
-        mem = self.repo.project_members_active(members_df, project)
-        if mem.empty:
-            st.warning("このプロジェクトに 🟢運用中 のメンバーがいません。")
+        active_members = self._active_members(members_df, project)
+
+        if active_members.empty:
+            st.warning("このプロジェクトに有効メンバーがいません。")
             return
 
-        person = st.selectbox("メンバー", mem["PersonName"].tolist())
-        row = mem[mem["PersonName"] == person].iloc[0]
-        current = float(row["Principal"])
+        st.subheader("入出金入力")
 
-        typ = st.selectbox("種別", [AppConfig.TYPE["DEPOSIT"], AppConfig.TYPE["WITHDRAW"]])
-        amt = st.number_input("金額", min_value=0.0, value=0.0, step=100.0)
-        note = st.text_input("メモ（任意）", value="")
+        person = st.selectbox("メンバー", active_members["PersonName"].astype(str).tolist(), key="cash_person")
+        row = active_members[active_members["PersonName"].astype(str) == str(person)].iloc[0]
+
+        current_balance = float(pd.to_numeric(pd.Series([row.get("Principal", 0)]), errors="coerce").fillna(0).iloc[0])
+
+        c1, c2 = st.columns(2)
+        with c1:
+            typ = st.selectbox(
+                "種別",
+                [AppConfig.TYPE["DEPOSIT"], AppConfig.TYPE["WITHDRAW"]],
+                key="cash_type",
+            )
+        with c2:
+            amount = st.number_input("金額", min_value=0.0, value=0.0, step=100.0, key="cash_amount")
+
+        note = st.text_input("メモ", value="", key="cash_note")
         uploaded = st.file_uploader("エビデンス画像（任意）", type=["png", "jpg", "jpeg"], key="cash_img")
 
-        if st.button("確定して保存＆個別にLINE通知"):
-            try:
-                if amt <= 0:
-                    st.warning("金額が0です。")
-                    return
-                if typ == AppConfig.TYPE["WITHDRAW"] and float(amt) > current:
-                    st.error("出金額が現在残高を超えています。")
-                    return
+        st.info(f"現在残高: {U.fmt_usd(current_balance)}")
 
-                evidence_url = ExternalService.upload_imgbb(uploaded.getvalue()) if uploaded else None
-                if uploaded and not evidence_url:
-                    st.error("画像アップロードに失敗しました。")
-                    return
+        if st.button("保存", use_container_width=True, key="cash_save"):
+            if amount <= 0:
+                st.warning("金額を入力してください。")
+                return
 
-                new_balance = current + float(amt) if typ == AppConfig.TYPE["DEPOSIT"] else current - float(amt)
-                ts = U.fmt_dt(U.now_jst())
+            if typ == AppConfig.TYPE["WITHDRAW"] and float(amount) > float(current_balance):
+                st.error("出金額が現在残高を超えています。")
+                return
 
-                for i in range(len(members_df)):
-                    if members_df.loc[i, "Project_Name"] == str(project) and str(members_df.loc[i, "PersonName"]).strip() == str(person).strip():
-                        members_df.loc[i, "Principal"] = float(new_balance)
-                        members_df.loc[i, "UpdatedAt_JST"] = ts
+            evidence_url = ExternalService.upload_imgbb(uploaded.getvalue()) if uploaded else ""
+            if uploaded and not evidence_url:
+                st.error("画像アップロードに失敗しました。")
+                return
 
-                self.repo.append_ledger(ts, project, person, typ, float(amt), note, evidence_url or "", str(row["Line_User_ID"]).strip(), str(row["LINE_DisplayName"]).strip())
-                self.repo.write_members(members_df)
+            new_balance = (
+                float(current_balance) + float(amount)
+                if typ == AppConfig.TYPE["DEPOSIT"]
+                else float(current_balance) - float(amount)
+            )
 
-                token = ExternalService.get_line_token(AdminAuth.current_namespace())
-                uid = str(row["Line_User_ID"]).strip()
-                msg = (
-                    "💸【入出金通知】\n"
+            now_str = U.fmt_dt(U.now_jst())
+            uid = str(row.get("Line_User_ID", "")).strip()
+            display_name = str(row.get("LINE_DisplayName", "")).strip()
+
+            # Ledger 記録
+            self.repo.append_ledger(
+                dt_jst=now_str,
+                project=str(project).strip(),
+                person_name=str(person).strip(),
+                typ=str(typ).strip(),
+                amount=float(amount),
+                note=str(note).strip(),
+                evidence_url=str(evidence_url).strip(),
+                line_user_id=uid,
+                line_display_name=display_name,
+                source=AppConfig.SOURCE["APP"],
+            )
+
+            # Members 更新
+            new_members_df = self._write_member_balance(
+                members_df=members_df,
+                project=project,
+                person=person,
+                new_balance=new_balance,
+            )
+            self.repo.write_members(new_members_df)
+
+            # LINE 通知
+            token = ExternalService.get_line_token(AdminAuth.current_namespace())
+
+            if uid:
+                line_text = (
+                    f"💸【入出金通知】\n"
                     f"{person} 様\n"
-                    f"日時: {U.now_jst().strftime('%Y/%m/%d %H:%M')}\n"
+                    f"プロジェクト: {project}\n"
                     f"種別: {typ}\n"
-                    f"金額: {U.fmt_usd(float(amt))}\n"
-                    f"更新後残高: {U.fmt_usd(float(new_balance))}\n"
+                    f"金額: {U.fmt_usd(amount)}\n"
+                    f"更新後残高: {U.fmt_usd(new_balance)}\n"
+                    f"日時: {U.now_jst().strftime('%Y/%m/%d %H:%M')}"
                 )
 
-                if uid:
-                    code = ExternalService.send_line_push(token, uid, msg, evidence_url)
-                    line_note = f"HTTP:{code}, Type:{typ}, Amount:{float(amt)}, NewBalance:{float(new_balance)}"
-                else:
-                    code, line_note = 0, "LINE未送信: Line_User_IDなし"
+                code = ExternalService.send_line_push(token, uid, line_text, evidence_url or None)
 
-                self.repo.append_ledger(ts, project, person, AppConfig.TYPE["LINE"], 0, line_note, evidence_url or "", uid, str(row["LINE_DisplayName"]).strip())
-                self.store.persist_and_refresh()
+                self.repo.append_ledger(
+                    dt_jst=now_str,
+                    project=str(project).strip(),
+                    person_name=str(person).strip(),
+                    typ=AppConfig.TYPE["LINE"],
+                    amount=0,
+                    note=f"Cash通知 HTTP:{code}",
+                    evidence_url=str(evidence_url).strip(),
+                    line_user_id=uid,
+                    line_display_name=display_name,
+                    source=AppConfig.SOURCE["APP"],
+                )
 
-                if code == 200:
-                    st.success("入出金保存＆LINE送信記録完了")
-                else:
-                    st.warning(f"入出金保存完了 / LINE送信または送信記録あり（HTTP {code}）")
-                st.rerun()
-            except Exception as e:
-                st.error(f"入出金処理でエラー: {e}")
-                st.stop()
+            self.store.persist_and_refresh()
+            st.success("入出金を保存しました。")
+            st.rerun()
+
+        st.divider()
+        st.subheader("最近の入出金")
+
+        ledger_df = self._safe_df(self.repo.load_ledger())
+        if ledger_df.empty:
+            st.info("Ledger にデータがありません。")
+            return
+
+        show = ledger_df.copy()
+        show["Project_Name"] = show["Project_Name"].astype(str).str.strip()
+        show["Type"] = show["Type"].astype(str).str.strip()
+
+        show = show[
+            (show["Project_Name"] == str(project).strip()) &
+            (show["Type"].isin([AppConfig.TYPE["DEPOSIT"], AppConfig.TYPE["WITHDRAW"]]))
+        ].copy()
+
+        if show.empty:
+            st.info("このプロジェクトの入出金履歴はありません。")
+            return
+
+        if "Amount" in show.columns:
+            show["Amount"] = pd.to_numeric(show["Amount"], errors="coerce").fillna(0.0)
+
+        if "Datetime_JST" in show.columns:
+            show = show.sort_values("Datetime_JST", ascending=False)
+
+        st.dataframe(
+            self._safe_df(show.head(50)),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# END OF FILE
