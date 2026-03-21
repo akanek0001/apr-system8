@@ -18,9 +18,6 @@ class APRPage:
         self.engine = engine
         self.store = store
 
-    # =========================
-    # helper
-    # =========================
     def _safe_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
@@ -59,9 +56,6 @@ class APRPage:
     def _today_str(self) -> str:
         return U.fmt_date(U.now_jst())
 
-    # =========================
-    # save ledger
-    # =========================
     def _write_apr_ledger(
         self,
         apr_df: pd.DataFrame,
@@ -92,10 +86,7 @@ class APRPage:
 
         return count
 
-    def _write_apr_summary(
-        self,
-        apr_df: pd.DataFrame,
-    ) -> None:
+    def _write_apr_summary(self, apr_df: pd.DataFrame) -> None:
         if apr_df is None or apr_df.empty:
             return
 
@@ -110,13 +101,13 @@ class APRPage:
         if existing.empty:
             merged = summary_df.copy()
         else:
-            existing = existing[
+            merged = existing[
                 ~(
                     (existing["Date_JST"].astype(str).str.strip() == str(date_jst).strip())
                     & (existing["Project_Name"].astype(str).str.strip() == str(summary_df.iloc[0]["Project_Name"]).strip())
                 )
             ].copy()
-            merged = pd.concat([existing, summary_df], ignore_index=True)
+            merged = pd.concat([merged, summary_df], ignore_index=True)
 
         self.repo.write_apr_summary(merged)
 
@@ -196,9 +187,6 @@ class APRPage:
 
         return ok_count, ng_count
 
-    # =========================
-    # render
-    # =========================
     def render(self) -> None:
         st.title("APR設定 / 実行")
         st.caption(f"管理者: {AdminAuth.current_namespace()}")
@@ -265,7 +253,6 @@ class APRPage:
 
         st.divider()
 
-        # 本日すでにAPRがあるかを表示
         today = self._today_str()
         existing_keys = self.repo.existing_apr_keys_for_date(today)
         target_keys = set(
@@ -281,7 +268,6 @@ class APRPage:
 
         with c5:
             if st.button("APR実行", use_container_width=True):
-                # APR保存
                 save_count = self._write_apr_ledger(
                     apr_df=preview,
                     project=project,
@@ -289,10 +275,8 @@ class APRPage:
                     note=note,
                 )
 
-                # APR Summary保存
                 self._write_apr_summary(preview)
 
-                # Daily複利反映
                 new_members_df = self._apply_compound_if_needed(
                     settings_df=settings_df,
                     members_df=members_df,
@@ -302,7 +286,6 @@ class APRPage:
                 if not new_members_df.equals(members_df):
                     self.repo.write_members(new_members_df)
 
-                # LINE送信
                 ok_count, ng_count = self._send_line_if_needed(
                     apr_df=preview,
                     project=project,
