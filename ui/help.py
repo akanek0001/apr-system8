@@ -1,92 +1,266 @@
 from __future__ import annotations
 
-import pandas as pd
+import io
+import re
+from typing import Dict
+
+import requests
 import streamlit as st
+from PIL import Image, ImageDraw
 
 from config import AppConfig
-from core.auth import AdminAuth
-from core.utils import U
 from repository.repository import Repository
-from services.gsheet_service import GSheetService
-from store.datastore import DataStore
+from core.auth import AdminAuth
 
 
 class HelpPage:
-    def __init__(self, repo: Repository, store: DataStore):
+    def __init__(self, repo: Repository):
         self.repo = repo
-        self.store = store
 
-    def render(self, gs: GSheetService, settings_df: pd.DataFrame) -> None:
-        st.subheader("❓ ヘルプ / 使い方")
-        st.caption(f"{AppConfig.RANK_LABEL} / 管理者: {AdminAuth.current_label()}")
-        st.markdown("""
-このアプリは、APR運用の記録、入出金、メンバー管理、LINE通知をまとめて扱う管理システムです。
-左メニューの **📊 ダッシュボード / 📈 APR / 💸 入金/出金 / ⚙️ 管理 / ❓ ヘルプ** で画面を切り替えます。
-""")
-        with st.expander("1. 現在の接続情報", expanded=False):
-            st.code(f"""参照シート
-Settings           = {gs.names.SETTINGS}
-Members            = {gs.names.MEMBERS}
-Ledger             = {gs.names.LEDGER}
-LineUsers          = {gs.names.LINEUSERS}
-APR_Summary        = {gs.names.APR_SUMMARY}
-SmartVault_History = {gs.names.SMARTVAULT_HISTORY}
+    # =========================
+    # OCR API
+    # =========================
+    def _ocr_request(self, img_bytes: bytes) -> str:
+        api_key = st.secrets["ocrspace"]["api_key"]
 
-Spreadsheet ID
-{gs.spreadsheet_id}
+        res = requests.post(
+            "https://api.ocr.space/parse/image",
+            files={"file": ("img.png", img_bytes)},
+            data={
+                "apikey": api_key,
+                "language": "eng",
+                "isOverlayRequired": False,
+            },
+            timeout=30,
+        )
 
-Spreadsheet URL
-{gs.spreadsheet_url()}
-""")
-        with st.expander("2. シート構成", expanded=False):
-            for key, title in [("SETTINGS","Settings"),("MEMBERS","Members"),("LEDGER","Ledger"),("LINEUSERS","LineUsers"),("APR_SUMMARY","APR Summary"),("SMARTVAULT_HISTORY","SmartVault_History")]:
-                st.markdown(f"### {title}")
-                st.code("\t".join(AppConfig.HEADERS[key]))
-        with st.expander("3. Compound_Timing の意味", expanded=False):
-            st.markdown("""
-- `daily`
-  APR確定時に元本へ即時加算します。次回以降は増えた元本で計算します。
+        data = res.json()
+        if "ParsedResults" not in data or not data["ParsedResults"]:
+            return ""
+        return str(data["ParsedResults"][0].get("ParsedText", "")).strip()
 
-- `monthly`
-  APR確定時は Ledger に記録のみ行います。元本への反映は APR画面の「未反映APRを元本へ反映」でまとめて行います。
+    # =========================
+    # 画像切り抜き
+    # =========================
+    def _crop(self, img: Image.Image, box: Dict[str, float]) -> Image.Image:
+        w, h = img.size
+        return img.crop(
+            (
+                int(box["left"] * w),
+                int(box["top"] * h),
+                int(box["right"] * w),
+                int(box["bottom"] * h),
+            )
+        )
 
-- `none`
-  単利です。APRは Ledger に記録しますが、元本には加算しません。
-""")
-        with st.expander("4. APR計算ロジック", expanded=False):
-            st.markdown("""
+    # =========================
+    # 数値抽出
+    # =========================
+    def _num(self, text: str) -> float:
+        m = re.findall(r"[-+]?\d*\.\d+|\d+", str(text).replace(",", ""))
+        return float(m[0]) if m else 0.0
+
+    # =========================
+    # 枠描画
+    # =========================
+    def _draw(self, img: Image.Image, boxes: Dict[str, Dict[str, float]]) -> Image.Image:
+        d = ImageDraw.Draw(img)
+        w, h = img.size
+
+        for b in boxes.values():
+            d.rectangle(
+                [
+                    (b["left"] * w, b["top"] * h),
+                    (b["right"] * w, b["bottom"] * h),
+                ],
+                outline="red",
+                width=3,
+            )
+        return img
+
+    # =========================
+    # メイン
+    # =========================
+    def render(self) -> None:
+        st.title("ヘルプ / OCR設定")
+        st.caption(f"管理者: {AdminAuth.current_namespace()}")
+
+        settings_df = self.repo.load_settings()
+        projects = self.repo.active_projects(settings_df)
+
+        st.markdown(
+            """
+## 使用シート一覧
+
+### シート命名ルール
+すべてのシートは次の形式で統一します。
+
+`<BaseName>__<Namespace>`
+
+例:
+- Settings__A
+- Members__A
+- Ledger__A
+- LineUsers__A
+- APR_Summary__A
+- SmartVault_History__A
+- OCR_Transaction__A
+- OCR_Transaction_History__A
+- APR_Auto_Queue__A
+
+`_A` ではなく、必ず `__A` を使います。  
+無印シートは使いません。
+
+---
+
+### A環境の使用シート
+- Settings__A
+- Members__A
+- Ledger__A
+- LineUsers__A
+- APR_Summary__A
+- SmartVault_History__A
+- OCR_Transaction__A
+- OCR_Transaction_History__A
+- APR_Auto_Queue__A
+
+---
+
+## シート役割
+
+### Settings__A
+APR設定、OCR座標、Compound_Timing、Active管理
+
+### Members__A
+メンバー管理（元本、LINE ID、Rank、状態）
+
+### Ledger__A
+APR、入出金、LINE送信など全履歴
+
+### LineUsers__A
+LINEユーザー情報
+
+### APR_Summary__A
+日次APR集計
+
+### SmartVault_History__A
+Liquidity、Yesterday Profit、APR の履歴
+
+### OCR_Transaction__A
+OCR解析の作業データ
+
+### OCR_Transaction_History__A
+OCR履歴、重複防止
+
+### APR_Auto_Queue__A
+APR自動処理キュー
+
+---
+
+## 計算ロジック
+
+### Rank係数
+- Master = 0.67
+- Elite = 0.60
+
+### Compound_Timing
+- daily = 日次複利
+- monthly = 月次複利
+- none = 複利なし
+
 ### PERSONAL
-`DailyAPR = Principal × (最終APR% / 100) × Rank係数 ÷ 365`
+DailyAPR = Principal × APR ÷ 100 × Rank係数 ÷ 365
 
-### GROUP（PERSONAL以外）
-`グループ総配当 = グループ総元本 × (最終APR% / 100) × Net_Factor ÷ 365`
+### GROUP
+TotalAPR = 総元本 × APR ÷ 100 × Net_Factor ÷ 365  
+DailyAPR = TotalAPR ÷ 対象人数
 
-`1人あたり配当 = グループ総配当 ÷ 人数`
+### 挙動
+- daily: 元本へ即時反映
+- monthly: 月次反映
+- none: Ledger記録のみ
 
-### 重複防止
-同日・同一プロジェクト・同一人物の APR は Ledger を見て1回だけ記録します。
-""")
-        with st.expander("5. Make連携", expanded=False):
-            st.markdown("`LINE Watch Events → HTTP(プロフィール取得) → Google Sheets Search Rows → Filter(0件のみ) → Google Sheets Add a Row`")
-            st.code("\t".join(AppConfig.HEADERS["LINEUSERS"]))
-        with st.expander("6. Settings自動修復", expanded=False):
-            if st.button("Settingsを自動修復", key="help_fix_settings", use_container_width=True):
-                try:
-                    self.repo.repair_settings(self.repo.load_settings())
-                    self.store.persist_and_refresh()
-                    st.success(f"{self.repo.gs.names.SETTINGS} を修復しました。")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Settings修復でエラー: {e}")
-        with st.expander("7. OCR設定（座標設定 + 赤枠プレビュー）", expanded=False):
-            projects = self.repo.active_projects(settings_df)
-            if not projects:
-                st.warning("有効なプロジェクトがありません。")
-                return
-            ocr_project = st.selectbox("OCR設定対象プロジェクト", projects, key="help_ocr_project")
-            row_setting = settings_df[settings_df["Project_Name"] == ocr_project].iloc[0]
-            current_vals = pd.DataFrame([{k: row_setting.get(k, v) for k, v in {**AppConfig.OCR_DEFAULTS_PC, **AppConfig.OCR_DEFAULTS_MOBILE}.items()}])
-            st.dataframe(current_vals, use_container_width=True, hide_index=True)
-            preview = st.file_uploader("画像をアップロードすると赤枠プレビューします", type=["png", "jpg", "jpeg"], key="help_ocr_preview")
-            if preview is not None:
-                st.image(U.draw_ocr_boxes(preview.getvalue(), AppConfig.SMARTVAULT_BOXES_MOBILE), caption="SmartVault固定赤枠", use_container_width=True)
+---
+
+## OCR仕様
+
+### SmartVault OCR
+- Total Liquidity
+- Yesterday Profit
+- APR
+
+### Transaction OCR
+- Date
+- Type
+- USD
+
+OCR座標は Settings__A で管理します。
+"""
+        )
+
+        if not projects:
+            st.warning("有効なプロジェクトがありません。")
+            return
+
+        project = st.selectbox("OCR設定対象プロジェクト", projects, key="help_project")
+        row = settings_df[settings_df["Project_Name"].astype(str).str.strip() == str(project).strip()].iloc[0]
+
+        def g(key: str, default: float) -> float:
+            try:
+                value = row.get(key, default)
+                if str(value).strip() == "":
+                    return float(default)
+                return float(value)
+            except Exception:
+                return float(default)
+
+        st.subheader("OCRテスト")
+
+        boxes = {
+            "LIQ": {
+                "left": g("SV_Total_Liquidity_Left_Mobile", 0.05),
+                "top": g("SV_Total_Liquidity_Top_Mobile", 0.25),
+                "right": g("SV_Total_Liquidity_Right_Mobile", 0.40),
+                "bottom": g("SV_Total_Liquidity_Bottom_Mobile", 0.34),
+            },
+            "PROFIT": {
+                "left": g("SV_Yesterday_Profit_Left_Mobile", 0.40),
+                "top": g("SV_Yesterday_Profit_Top_Mobile", 0.25),
+                "right": g("SV_Yesterday_Profit_Right_Mobile", 0.70),
+                "bottom": g("SV_Yesterday_Profit_Bottom_Mobile", 0.34),
+            },
+            "APR": {
+                "left": g("SV_APR_Left_Mobile", 0.70),
+                "top": g("SV_APR_Top_Mobile", 0.25),
+                "right": g("SV_APR_Right_Mobile", 0.95),
+                "bottom": g("SV_APR_Bottom_Mobile", 0.34),
+            },
+        }
+
+        f = st.file_uploader("画像", type=["png", "jpg", "jpeg"], key="help_ocr_file")
+
+        if not f:
+            return
+
+        img = Image.open(f).convert("RGB")
+        st.image(self._draw(img.copy(), boxes), caption="OCR範囲")
+
+        results = {}
+
+        for k, b in boxes.items():
+            crop = self._crop(img, b)
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+
+            txt = self._ocr_request(buf.getvalue())
+            results[k] = {
+                "text": txt,
+                "value": self._num(txt),
+            }
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Liquidity", f"{results['LIQ']['value']}")
+        c2.metric("Yesterday Profit", f"{results['PROFIT']['value']}")
+        c3.metric("APR", f"{results['APR']['value']}")
+
+        st.text_area("RAW", str(results), height=220)
