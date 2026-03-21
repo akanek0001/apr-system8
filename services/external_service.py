@@ -1,55 +1,147 @@
 from __future__ import annotations
 
-from typing import List, Optional
-import json
+from io import BytesIO
+from typing import Optional
 
 import requests
 import streamlit as st
+from PIL import Image
 
-from core.utils import U
+from core.auth import AdminAuth
 
 
 class ExternalService:
+    # =========================
+    # secrets
+    # =========================
     @staticmethod
-    def get_line_token(ns: str) -> str:
-        line = st.secrets.get("line", {}) or {}
-        tokens = line.get("tokens")
-        if tokens:
-            tok = str(tokens.get(ns, "")).strip()
-            if tok:
-                return tok
-        legacy = str(line.get("channel_access_token", "")).strip()
-        if legacy:
-            return legacy
-        st.error("LINEトークンが未設定です。")
-        st.stop()
+    def _get_secret(*keys: str, default: str = "") -> str:
+        for path in keys:
+            try:
+                cur = st.secrets
+                for k in path.split("."):
+                    cur = cur[k]
+                return str(cur).strip()
+            except Exception:
+                pass
+        return default
+
+    # =========================
+    # LINE
+    # =========================
+    @staticmethod
+    def get_line_token(namespace: str | None = None) -> str:
+        ns = str(namespace or AdminAuth.current_namespace()).strip() or "A"
+        return ExternalService._get_secret(f"line.tokens.{ns}", default="")
 
     @staticmethod
-    def send_line_push(token: str, user_id: str, text: str, image_url: Optional[str] = None) -> int:
-        if not user_id:
-            return 400
-        url = "https://api.line.me/v2/bot/message/push"
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
-        messages = [{"type": "text", "text": text}]
+    def send_line_push(
+        token: str,
+        uid: str,
+        text: str,
+        image_url: Optional[str] = None,
+    ) -> int:
+        if not token or not uid:
+            return 0
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+
+        messages = [{"type": "text", "text": str(text)}]
+
         if image_url:
-            messages.append({"type": "image", "originalContentUrl": image_url, "previewImageUrl": image_url})
+            messages.append(
+                {
+                    "type": "image",
+                    "originalContentUrl": str(image_url),
+                    "previewImageUrl": str(image_url),
+                }
+            )
+
         try:
-            r = requests.post(url, headers=headers, data=json.dumps({"to": str(user_id), "messages": messages}), timeout=25)
-            return r.status_code
+            resp = requests.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers=headers,
+                json={"to": uid, "messages": messages},
+                timeout=30,
+            )
+            return int(resp.status_code)
         except Exception:
-            return 500
+            return 0
+
+    # =========================
+    # ImgBB
+    # =========================
+    @staticmethod
+    def upload_imgbb(file_bytes: bytes | None) -> Optional[str]:
+        if not file_bytes:
+            return None
+
+        api_key = ExternalService._get_secret("imgbb.api_key", default="")
+        if not api_key:
+            return None
+
+        try:
+            payload = {
+                "key": api_key,
+            }
+            files = {
+                "image": file_bytes,
+            }
+
+            resp = requests.post(
+                "https://api.imgbb.com/1/upload",
+                data=payload,
+                files=files,
+                timeout=60,
+            )
+            data = resp.json()
+
+            if not data.get("success"):
+                return None
+
+            return str(data["data"]["url"]).strip()
+        except Exception:
+            return None
+
+    # =========================
+    # OCR.space
+    # =========================
+    @staticmethod
+    def _ocr_api_key() -> str:
+        return ExternalService._get_secret("ocrspace.api_key", "ocr.api_key", default="")
 
     @staticmethod
-    def upload_imgbb(file_bytes: bytes) -> Optional[str]:
+    def ocr_space_extract_text(image_bytes: bytes) -> str:
+        api_key = ExternalService._ocr_api_key()
+        if not api_key or not image_bytes:
+            return ""
+
         try:
-            key = st.secrets["imgbb"]["api_key"]
+            resp = requests.post(
+                "https://api.ocr.space/parse/image",
+                files={"file": ("image.png", image_bytes)},
+                data={
+                    "apikey": api_key,
+                    "language": "eng",
+                    "isOverlayRequired": "false",
+                    "OCREngine": "2",
+                    "scale": "true",
+                },
+                timeout=60,
+            )
+            data = resp.json()
+
+            parsed = data.get("ParsedResults", [])
+            if not parsed:
+                return ""
+
+            texts = [str(item.get("ParsedText", "")).strip() for item in parsed]
+            return "\n".join([t for t in texts if t]).strip()
         except Exception:
-            return None
-        try:
-            res = requests.post("https://api.imgbb.com/1/upload", params={"key": key}, files={"image": file_bytes}, timeout=30)
-            return res.json()["data"]["url"]
-        except Exception:
-            return None
+            return ""
 
     @staticmethod
     def ocr_space_extract_text_with_crop(
@@ -59,52 +151,88 @@ class ExternalService:
         crop_right_ratio: float,
         crop_bottom_ratio: float,
     ) -> str:
+        api_key = ExternalService._ocr_api_key()
+        if not api_key or not file_bytes:
+            return ""
+
         try:
-            api_key = st.secrets["ocrspace"]["api_key"]
+            image = Image.open(BytesIO(file_bytes)).convert("RGB")
+            w, h = image.size
+
+            left = max(0, min(w, int(w * float(crop_left_ratio))))
+            top = max(0, min(h, int(h * float(crop_top_ratio))))
+            right = max(0, min(w, int(w * float(crop_right_ratio))))
+            bottom = max(0, min(h, int(h * float(crop_bottom_ratio))))
+
+            if right <= left or bottom <= top:
+                return ""
+
+            cropped = image.crop((left, top, right, bottom))
+
+            buf = BytesIO()
+            cropped.save(buf, format="PNG")
+            buf.seek(0)
+
+            resp = requests.post(
+                "https://api.ocr.space/parse/image",
+                files={"file": ("crop.png", buf.getvalue())},
+                data={
+                    "apikey": api_key,
+                    "language": "eng",
+                    "isOverlayRequired": "false",
+                    "OCREngine": "2",
+                    "scale": "true",
+                },
+                timeout=60,
+            )
+            data = resp.json()
+
+            parsed = data.get("ParsedResults", [])
+            if not parsed:
+                return ""
+
+            texts = [str(item.get("ParsedText", "")).strip() for item in parsed]
+            return "\n".join([t for t in texts if t]).strip()
         except Exception:
             return ""
 
-        texts: List[str] = []
-        try:
-            cropped_bytes = U.crop_image_by_ratio(
-                file_bytes=file_bytes,
-                left_ratio=crop_left_ratio,
-                top_ratio=crop_top_ratio,
-                right_ratio=crop_right_ratio,
-                bottom_ratio=crop_bottom_ratio,
-            )
-            processed_list = U.preprocess_ocr_image(cropped_bytes)
-            targets = [("cropped.png", cropped_bytes)] + [(f"processed_{i}.png", b) for i, b in enumerate(processed_list, start=1)]
-            for target_name, target_bytes in targets:
-                for engine in (2, 1):
-                    try:
-                        res = requests.post(
-                            "https://api.ocr.space/parse/image",
-                            files={"filename": (target_name, target_bytes)},
-                            data={
-                                "apikey": api_key,
-                                "language": "eng",
-                                "isOverlayRequired": False,
-                                "OCREngine": engine,
-                                "scale": True,
-                                "detectOrientation": True,
-                                "isTable": False,
-                            },
-                            timeout=60,
-                        )
-                        data = res.json()
-                        for p in data.get("ParsedResults", []):
-                            txt = str(p.get("ParsedText", "")).strip()
-                            if txt:
-                                texts.append(txt)
-                    except Exception:
-                        continue
-            uniq, seen = [], set()
-            for t in texts:
-                key = t.strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    uniq.append(key)
-            return "\n\n".join(uniq)
-        except Exception:
-            return ""
+    # =========================
+    # OCR helpers
+    # =========================
+    @staticmethod
+    def extract_number_candidates(text: str) -> list[float]:
+        import re
+
+        if not text:
+            return []
+
+        found = re.findall(r"[-+]?\d[\d,]*\.?\d*", str(text))
+        out: list[float] = []
+
+        for x in found:
+            xs = str(x).replace(",", "").strip()
+            if xs in {"", "-", "+", ".", "-.", "+."}:
+                continue
+            try:
+                out.append(float(xs))
+            except Exception:
+                pass
+
+        return out
+
+    @staticmethod
+    def extract_first_number(text: str, default: float = 0.0) -> float:
+        vals = ExternalService.extract_number_candidates(text)
+        if not vals:
+            return float(default)
+        return float(vals[0])
+
+    @staticmethod
+    def extract_max_number(text: str, default: float = 0.0) -> float:
+        vals = ExternalService.extract_number_candidates(text)
+        if not vals:
+            return float(default)
+        return float(max(vals))
+
+
+# END OF FILE
